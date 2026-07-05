@@ -24,12 +24,22 @@ chat assistants and long-context LLMs drop ~30% accuracy under sustained
 interaction, and proposes session decomposition + time-aware query expansion as
 mitigations — neither involves multi-hop derived-fact dependency tracking.
 
-**Scale (verified, for cost/runtime budgeting):** `-S` haystacks average ~115K
-tokens across ~40–48 sessions (`-M` extends to ~1.5M tokens / ~500 sessions —
-not used here). The exact KU/TR question count and whether their haystacks are
-shared across questions (cheaper to extract once) or distinct per question
-(linear in question count) is **not confirmed** from public summaries — check
-the released JSON before budgeting extraction cost on this tier.
+**Scale (confirmed against released data, checked 2026-07-05):** the
+original HF release is deprecated; the maintained release is
+`xiaowu0162/longmemeval-cleaned` (removes noisy history sessions that
+interfered with answer correctness) — use it, since 2026 papers evaluate on
+it. From `longmemeval_s_cleaned.json` directly: 500 questions — multi-session
+133, **temporal-reasoning 133**, **knowledge-update 78**, single-session-user
+70, single-session-assistant 56, single-session-preference 30; 30 of the 500
+are abstention variants (`_abs` ids). Haystacks are effectively
+**per-question**: only 20.5% of unique session ids appear in more than one
+question, so extraction cost scales linearly — one full `-S` pass is ~61.2M
+input tokens (median haystack ~123K tokens, ~48 sessions; chars/4 estimate).
+KU questions carry exactly 2 evidence sessions each (old value, new value):
+the update structure is 1-hop by construction, with no derived-fact chains —
+consistent with the expectation that the diagnostic probe, not this tier,
+carries the multi-hop diagnostic weight (H3's "more modest" real-world
+prediction).
 
 Note: **LongMemEval-V2** (arXiv [2605.12493](https://arxiv.org/html/2605.12493v1))
 is a *different* benchmark despite the name — it targets agent *trajectory*
@@ -42,11 +52,21 @@ themselves come from the original (v1) LongMemEval paper, not from V2.
 
 [Maharana et al., *Evaluating Very Long-Term Conversational Memory of LLM
 Agents*, ACL 2024](https://arxiv.org/abs/2402.17753). **10 conversations**
-(19–32 sessions each, ~9K–16K tokens/conversation depending on
-arXiv-vs-ACL-published version), generating **1,986 QA pairs** across five
-categories: Single-hop, Multi-hop, Temporal, Open-domain, Adversarial.
-Generated via an LLM-agent pipeline grounded on personas and temporal event
-graphs. Used here for general non-regression / SOTA-comparison checks.
+(19–32 sessions each), **1,986 QA pairs** across five categories:
+Single-hop, Multi-hop, Temporal, Open-domain, Adversarial. Generated via an
+LLM-agent pipeline grounded on personas and temporal event graphs. Used here
+for general non-regression / SOTA-comparison checks.
+
+**Scale (confirmed against released `locomo10.json`, checked 2026-07-05):**
+10 conversations / 1,986 QA exactly. Per-category-id counts: 1: 282, 2: 321,
+3: 96, 4: 841, 5: 446 (the id→name mapping is not stated in the JSON;
+by size, 4 = single-hop and 5 = adversarial are the natural reading —
+verify against the paper appendix before naming categories in the paper).
+Measured ~10.8–22.2K tokens/conversation, ~180K total (chars/4 estimate) —
+slightly above the ~9K–16K cited from the paper, which counts tokens with a
+real tokenizer on the ACL version. Either way the corpus is small; the cost
+driver for this tier remains the 1,986 QA pairs through reader+judge, not
+extraction.
 
 Corrected from an earlier draft of this doc/the project README, which stated
 "~1540 conversations" — likely a conflation with the QA-pair count (1,986).
@@ -80,14 +100,25 @@ This project uses **BEAM-1M** only. BEAM-10M is excluded — cost per conversati
 (10M tokens) is disproportionate to the marginal evaluation value for a single
 module.
 
-**Scale (verified):** 100 conversations / 2,000 questions total across 4
-length tiers and 10 abilities. The exact per-tier (how many of the 100
-conversations sit at the 1M tier) and per-ability (how many of the 2,000
-questions are CR/EO/KU) breakdown is **not published in the abstract/summary
-sources checked** — assume an even split (~25 conversations, ~150 CR/EO/KU
-questions) only as a rough budgeting placeholder, and confirm against the
-released dataset (`github.com/mohammadtavakoli78/BEAM`) before committing
-budget.
+**Scale (confirmed against released data, checked 2026-07-05):** per-tier
+split from the repo README: 128K: 20, 500K: 35, **1M: 35**, 10M: 10
+conversations. From the released `probing_questions.json` files, the 1M tier
+has exactly 2 questions per ability per conversation: **700 questions, 70
+per ability — CR + EO + KU = 210** (the earlier ~150 placeholder was low).
+Measured conversation size at the 1M tier: 0.78–1.93M tokens, median 1.14M,
+~42M tokens total (chars/4 on the released JSON) — one full ingestion pass
+of the 1M tier is comparable in input volume to a LongMemEval-S pass.
+
+Two harness-relevant observations from the released CR items: (i) they are
+direct restated contradictions, as the paper says — `contradiction_type`
+labels like `never_statement_violation`, with `source_chat_ids` pointing at
+both sides; (ii) the `ideal_answer` is to *flag the contradiction and ask
+for clarification*, not to pick a winner. A system that silently resolves
+by recency (ours, and most baselines) will fail BEAM-CR's rubric unless the
+answer layer surfaces detected conflicts — the retrieval/reader adapter
+must expose conflict metadata, not just the winning edge. Plan for this in
+the harness before E3, or BEAM-CR will under-credit exactly the systems
+that handle contradictions best.
 
 ## STALE
 
@@ -111,11 +142,24 @@ unsolved even by specialized memory frameworks, not only by raw LLMs. Adopted
 as a category-focused evaluation tier (its own benchmark, not via category
 subset extraction).
 
-**Scale (verified):** 400 scenarios / 1,200 queries, contexts **"up to" 150K
-tokens** — no published average. Cost estimates so far have assumed ~75K
-tokens/scenario (half of the stated max) as a placeholder; this is the
-single largest source of uncertainty in any cost projection involving STALE
-and should be confirmed against the released data first.
+**Scale (confirmed against released data, checked 2026-07-05):** release at
+`github.com/icedreamc/STALE` + HF `STALEproj/STALE`
+(`T1_T2_400_FULL.json`, 306MB). 400 scenarios / 1,200 queries exactly
+(3 per scenario, one per probing dimension). The scenarios split 200/200
+into **T1 (explicit update** — the new state is stated outright**) and T2
+(implicit update** — the new state must be inferred, e.g. a Portland
+resident who starts mentioning bark scorpions and dry heat**)**; T2 is the
+extraction-difficulty half, directly relevant to the `classify(e)`
+reliability question. Each scenario carries a 50-session haystack with
+`relevant_session_index` marking the old/new-state sessions — usable as
+gold for internal-state scoring, not just end-to-end QA. Measured context
+size: 162–194K tokens/scenario, median ~179K, ~71.4M total (chars/4 on the
+full JSON; a real tokenizer will land somewhat lower) — the earlier ~75K
+placeholder understates this tier's cost by ~2x; redo the cost projection
+before E3. The HF repo ships a `LongMemEval_LICENSE`: STALE haystacks build
+on LongMemEval session material, so treat LongMemEval and STALE tiers as
+sharing surface distribution (not independent evidence) when interpreting
+results across the two.
 
 ## BeliefShift (related, not adopted)
 
