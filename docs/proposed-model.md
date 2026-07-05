@@ -98,8 +98,9 @@ This pseudocode implements formalism.md's Theorem 2 and 3:
   free optimization. Edges outside the explored frontier are stale-by-omission,
   not provably correct — this is the formal object behind
   [RQ4/H4](../README.md#hypotheses).
-- Termination and the `O(D · b)` bound (bounded mode) / `O(|C|)` bound
-  (unbounded mode) are formalism.md Theorem 3, not re-derived here.
+- Termination and the `O(D · b)` bound (bounded mode) / `O(m_C)` bound
+  (unbounded mode; `m_C` = dependency links in the affected component) are
+  formalism.md Theorem 3, not re-derived here.
 
 ### Why triggering is selective (cost control, → H4)
 
