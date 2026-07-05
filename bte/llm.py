@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -64,10 +65,49 @@ class CachedLLM:
         path.write_text(json.dumps(data, indent=1))
         return data
 
+    def _create(self, attempts: int = 3, **kwargs):
+        """Provider hiccups (truncated bodies, transient 5xx) surface as
+        parse or API errors; retry with backoff before giving up."""
+        for i in range(attempts):
+            try:
+                return self._client.chat.completions.create(**kwargs)
+            except Exception:
+                if i == attempts - 1:
+                    raise
+                time.sleep(2.0 * (i + 1))
+
+    def complete_text(self, system: str, user: str) -> str:
+        payload = {
+            "model": self.model, "kind": "text",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if self.extra:
+            payload["extra"] = self.extra
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        path = self.cache_dir / f"{digest}.json"
+        if path.exists():
+            with self._lock:
+                self.cache_hits += 1
+            return json.loads(path.read_text())["text"]
+        with self._lock:
+            self.calls += 1
+        resp = self._create(
+            model=self.model, messages=payload["messages"],
+            temperature=0, **self.extra)
+        text = resp.choices[0].message.content or ""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"text": text}))
+        return text
+
     def _request(self, payload: dict, schema_name: str, schema: dict) -> dict:
         if not self._schema_unsupported:
             try:
-                resp = self._client.chat.completions.create(
+                resp = self._create(
+                    attempts=1,
                     model=self.model,
                     messages=payload["messages"],
                     temperature=0,
@@ -87,7 +127,7 @@ class CachedLLM:
         messages[0]["content"] += (
             "\nRespond with a single JSON object matching this schema "
             "exactly:\n" + json.dumps(schema))
-        resp = self._client.chat.completions.create(
+        resp = self._create(
             model=self.model,
             messages=messages,
             temperature=0,

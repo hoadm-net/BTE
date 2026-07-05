@@ -14,7 +14,7 @@ pricing each was checked against (06/2026).
 | Conflict adjudication (escalate step, [contradiction-detection.md](contradiction-detection.md)) | **DeepSeek-V3.2**, same bake-off | same | same call shape (read context, emit small judgment); near-best axis classification |
 | Reader (fixed, [proposed-model.md](proposed-model.md) §5) | **Qwen3.5-9B** | $0.10 / $0.15 | fixed-reader protocol borrowed from LongMemEval-V2, open-weight, cheaper than any closed option for this role |
 | Judge | **GPT-5** (full, not mini/nano) | $0.63 / $5.00 | replaces GPT-4o — see below |
-| Embedding (BJG retrieval channel) | **Qwen3-Embedding-8B** | $0.01 / $0 | open-weight, pairs with Qwen3.5-9B per LongMemEval-V2's own memory-controller setup |
+| Embedding (BJG retrieval channel) | **text-embedding-3-small** (OpenAI) | $0.02 / $0 (batch $0.01; checked 2026-07-05) | the original pick (Qwen3-Embedding-8B) is not served by OpenRouter as of 2026-07-05 (verified against its models endpoint), and self-hosting is excluded by the no-hardware decision; embedding is infrastructure, not a compared component, so the closed fallback does not weaken the reproducibility argument for the memory module itself |
 
 No hardware constraint applies to any of these — all are accessed via API
 (OpenRouter for the open-weight models), not self-hosted, per the earlier
