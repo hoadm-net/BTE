@@ -1,5 +1,5 @@
 from bte.graph import BJG, Edge
-from bte.lattice import S, Sigma, TOP
+from bte.lattice import S, Sigma
 from bte.retrieval import BM25, HashEmbedder, Retriever, cosine, tokenize
 
 
