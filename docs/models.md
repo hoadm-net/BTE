@@ -10,8 +10,8 @@ pricing each was checked against (06/2026).
 
 | Role | Model | Price / 1M tok (in / out, 06/2026) | Why |
 | --- | --- | --- | --- |
-| Extraction (turn → edges) | **gpt-4o-mini** | $0.15 / $0.60 | matches Zep's choice for graph construction ([related-work.md](related-work.md) §1); cheapest option for an input-heavy/output-light task once GPT-5.x mini/nano tiers are checked (see below) |
-| Conflict adjudication (escalate step, [contradiction-detection.md](contradiction-detection.md)) | **gpt-4o-mini** | same | same reasoning; same call shape (read context, emit small judgment) |
+| Extraction (turn → edges) | **candidate set: DeepSeek-V3.2 (leaning default), gpt-4o-mini, GPT-4.1 nano** — final pick by probe bake-off, see 07/2026 revision below | $0.229/$0.343, $0.15/$0.60, $0.10/$0.40 | quality per dollar + reproducibility now outrank raw price; decided by measured edge-F1, not assertion |
+| Conflict adjudication (escalate step, [contradiction-detection.md](contradiction-detection.md)) | same candidate set, same bake-off | same | same call shape (read context, emit small judgment) |
 | Reader (fixed, [proposed-model.md](proposed-model.md) §5) | **Qwen3.5-9B** | $0.10 / $0.15 | fixed-reader protocol borrowed from LongMemEval-V2, open-weight, cheaper than any closed option for this role |
 | Judge | **GPT-5** (full, not mini/nano) | $0.63 / $5.00 | replaces GPT-4o — see below |
 | Embedding (BJG retrieval channel) | **Qwen3-Embedding-8B** | $0.01 / $0 | open-weight, pairs with Qwen3.5-9B per LongMemEval-V2's own memory-controller setup |
@@ -68,6 +68,43 @@ adjudication. Treat GPT-5 nano (original) as a cost experiment — re-run the
 diagnostic probe tier (cheap, ~175 items) on it first to confirm both the
 price advantage and that the older nano's extraction quality doesn't regress
 JTS-relevant accuracy, before switching the full pipeline.
+
+## 07/2026 revision: extraction/adjudication becomes a measured bake-off
+
+Pricing re-checked 2026-07-05 (developers.openai.com/api/docs/pricing,
+openrouter.ai), after the pilot confirmed real volumes: one full extraction
+pass over all four tiers is ~175M input / ~26M output tokens (LongMemEval-S
+61M + BEAM-1M 42M + STALE 71M + LoCoMo; see
+[evaluation-benchmarks.md](evaluation-benchmarks.md)).
+
+| Model | In / Out $/1M (07/2026) | Full pass | Notes |
+| --- | --- | --- | --- |
+| GPT-5.5 (flagship) | $5.00 / $30.00 | ~$1,655 | no 5.5 mini/nano tiers exist as of 07/2026; Batch/Flex halves it; cached input $0.50 |
+| GPT-5.4 nano | $0.20 / $1.25 | ~$68 | output price still uncompetitive for this call shape |
+| gpt-4o-mini | $0.15 / $0.60 | ~$42 | legacy but still served; Zep's own extraction choice |
+| GPT-4.1 nano | $0.10 / $0.40 | ~$28 | cheapest closed option currently served |
+| DeepSeek-V3.2 (OpenRouter) | $0.229 / $0.343 | ~$49 | ~236B-class open weights |
+
+At these volumes the bulk-role cost spread is ~$20–40 per pass — not a
+binding constraint. The decision criteria are therefore (in order):
+extraction quality (a missed edge poisons every downstream justification
+chain — direct H2 risk), reproducibility (open weights can be re-run by
+reviewers indefinitely; closed minis carry deprecation risk, cf. the GPT-5
+nano case below), and only then price. **Decision: run all three candidates
+over the diagnostic probe when it exists (edge-level F1 against the probe's
+gold justification chains, ~$5 total) and pick on measured quality; default
+leaning DeepSeek-V3.2 on the quality-per-dollar and open-weights arguments.
+The bake-off table goes in the paper's appendix** — it doubles as the
+extractor-sensitivity ablation reviewers ask for. GPT-5.5 is excluded for
+bulk roles on cost-benefit (40x price for a read-long/emit-short task);
+recorded here so the exclusion is a documented comparison, not an omission.
+
+Two cost mechanics worth using regardless of winner: OpenAI Batch API
+(-50%, extraction passes are offline-friendly; OpenRouter has no batch
+tier as of 07/2026), and the disk-level LLM call cache in the harness plan.
+
+The 06/2026 GPT-5-nano cost experiment below is superseded by this bake-off
+(kept for the pricing history).
 
 ## Open question
 
