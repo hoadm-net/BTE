@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
-from .lattice import TOP, Sigma, evaluate
+from .lattice import TOP, S, Sigma, evaluate
 
 ASSERTED = "asserted"
 DERIVED = "derived"
@@ -75,6 +75,42 @@ class BJG:
                 if member not in self.edges:
                     raise ValueError(f"unknown justification member {member!r}")
 
+    def add_alternative(self, edge_id: str, alt: frozenset[str]) -> None:
+        """Record one more independent derivation path for an existing
+        derived edge (multi-justification requirement). New support can
+        only raise status, so affected descendants are re-evaluated.
+        """
+        edge = self.edges[edge_id]
+        if edge.source_type != DERIVED:
+            raise ValueError("alternatives only apply to derived edges")
+        if not alt:
+            raise ValueError("justification alternative cannot be empty")
+        for member in alt:
+            if member == edge_id:
+                raise ValueError("edge cannot justify itself")
+            if member not in self.edges:
+                raise ValueError(f"unknown justification member {member!r}")
+            if member in self.descendants(edge_id):
+                raise ValueError("alternative would create a justification cycle")
+        if alt in edge.justification:
+            return
+        edge.justification = edge.justification + (alt,)
+        for member in alt:
+            self._dependents[member].add(edge_id)
+        self.recompute({edge_id})
+
+    def recompute(self, seed_ids: set[str]) -> None:
+        """Re-evaluate the given derived edges and everything downstream.
+        Insertion order is topological (members exist before dependents),
+        so a single ordered pass is exact.
+        """
+        affected = set(seed_ids)
+        for eid in seed_ids:
+            affected |= self.descendants(eid)
+        for eid in self.edges:
+            if eid in affected and self.edges[eid].source_type == DERIVED:
+                self._status[eid] = self._evaluate(eid)
+
     # -- status ------------------------------------------------------------
 
     def status(self, edge_id: str) -> Sigma:
@@ -115,3 +151,27 @@ class BJG:
         for eid, edge in self.edges.items():
             if edge.source_type == DERIVED:
                 yield eid
+
+    # -- queries -----------------------------------------------------------
+
+    def is_active(self, edge_id: str) -> bool:
+        """Active = not superseded on either axis (status has no BOT)."""
+        s = self._status[edge_id]
+        return s.valid != S.BOT and s.trans != S.BOT
+
+    def find(
+        self,
+        subject: Optional[str] = None,
+        relation: Optional[str] = None,
+        active_only: bool = True,
+    ) -> list[Edge]:
+        out = []
+        for eid, edge in self.edges.items():
+            if subject is not None and edge.subject != subject:
+                continue
+            if relation is not None and edge.relation != relation:
+                continue
+            if active_only and not self.is_active(eid):
+                continue
+            out.append(edge)
+        return out
