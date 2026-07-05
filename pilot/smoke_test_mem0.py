@@ -80,7 +80,7 @@ def main():
             out_lines.append(f"- ingested: {t}")
 
         stored = mem.get_all(filters={"user_id": user_id})
-        out_lines.append(f"\nstored memories after ingestion:")
+        out_lines.append("\nstored memories after ingestion:")
         for m in stored.get("results", stored) if isinstance(stored, dict) else stored:
             out_lines.append(f"  * {m.get('memory', m)}")
 
