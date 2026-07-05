@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -24,13 +25,17 @@ class CachedLLM:
         base_url: Optional[str] = None,
         api_key_env: str = "OPENAI_API_KEY",
         cache_dir: str = ".cache/llm",
+        extra: Optional[dict] = None,
     ) -> None:
         self.model = model
+        self.extra = extra or {}
         self.cache_dir = Path(cache_dir)
         self._client = OpenAI(
             base_url=base_url, api_key=os.environ.get(api_key_env))
         self.calls = 0
         self.cache_hits = 0
+        self._lock = threading.Lock()
+        self._schema_unsupported = False
 
     def complete_json(self, system: str, user: str, schema_name: str,
                       schema: dict) -> dict:
@@ -42,25 +47,51 @@ class CachedLLM:
             ],
             "schema": schema,
         }
+        if self.extra:
+            payload["extra"] = self.extra
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True).encode()).hexdigest()
         path = self.cache_dir / f"{digest}.json"
         if path.exists():
-            self.cache_hits += 1
+            with self._lock:
+                self.cache_hits += 1
             return json.loads(path.read_text())
 
-        self.calls += 1
-        resp = self._client.chat.completions.create(
-            model=self.model,
-            messages=payload["messages"],
-            temperature=0,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": schema_name, "schema": schema, "strict": True},
-            },
-        )
-        data = json.loads(resp.choices[0].message.content)
+        with self._lock:
+            self.calls += 1
+        data = self._request(payload, schema_name, schema)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=1))
         return data
+
+    def _request(self, payload: dict, schema_name: str, schema: dict) -> dict:
+        if not self._schema_unsupported:
+            try:
+                resp = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=payload["messages"],
+                    temperature=0,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {"name": schema_name,
+                                        "schema": schema, "strict": True},
+                    },
+                    **self.extra,
+                )
+                return json.loads(resp.choices[0].message.content)
+            except Exception:
+                # providers without strict schema support fall through to
+                # json_object mode with the schema stated in the prompt
+                self._schema_unsupported = True
+        messages = [dict(m) for m in payload["messages"]]
+        messages[0]["content"] += (
+            "\nRespond with a single JSON object matching this schema "
+            "exactly:\n" + json.dumps(schema))
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=0,
+            response_format={"type": "json_object"},
+            **self.extra,
+        )
+        return json.loads(resp.choices[0].message.content)

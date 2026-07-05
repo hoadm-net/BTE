@@ -10,8 +10,8 @@ pricing each was checked against (06/2026).
 
 | Role | Model | Price / 1M tok (in / out, 06/2026) | Why |
 | --- | --- | --- | --- |
-| Extraction (turn → edges) | **candidate set: DeepSeek-V3.2 (leaning default), gpt-4o-mini, GPT-4.1 nano** — final pick by probe bake-off, see 07/2026 revision below | $0.229/$0.343, $0.15/$0.60, $0.10/$0.40 | quality per dollar + reproducibility now outrank raw price; decided by measured edge-F1, not assertion |
-| Conflict adjudication (escalate step, [contradiction-detection.md](contradiction-detection.md)) | same candidate set, same bake-off | same | same call shape (read context, emit small judgment) |
+| Extraction (turn → edges) | **DeepSeek-V3.2** (OpenRouter) — selected by probe bake-off 07/2026, measured outcome below | $0.229 / $0.343 | best measured fact-F1 and end-state accuracy across candidates; open weights (reproducibility, no deprecation risk) |
+| Conflict adjudication (escalate step, [contradiction-detection.md](contradiction-detection.md)) | **DeepSeek-V3.2**, same bake-off | same | same call shape (read context, emit small judgment); near-best axis classification |
 | Reader (fixed, [proposed-model.md](proposed-model.md) §5) | **Qwen3.5-9B** | $0.10 / $0.15 | fixed-reader protocol borrowed from LongMemEval-V2, open-weight, cheaper than any closed option for this role |
 | Judge | **GPT-5** (full, not mini/nano) | $0.63 / $5.00 | replaces GPT-4o — see below |
 | Embedding (BJG retrieval channel) | **Qwen3-Embedding-8B** | $0.01 / $0 | open-weight, pairs with Qwen3.5-9B per LongMemEval-V2's own memory-controller setup |
@@ -102,6 +102,30 @@ recorded here so the exclusion is a documented comparison, not an omission.
 Two cost mechanics worth using regardless of winner: OpenAI Batch API
 (-50%, extraction passes are offline-friendly; OpenRouter has no batch
 tier as of 07/2026), and the disk-level LLM call cache in the harness plan.
+
+**Bake-off outcome (measured 2026-07-05; diagnostic probe v0, 168 items,
+canned surface; script `pilot/bakeoff_extraction.py`, reproducible from
+the LLM call cache):**
+
+| Model | fact F1 | axis accuracy | post-event state accuracy |
+| --- | --- | --- | --- |
+| gpt-4o-mini | 0.508 | 0.512 | 0.429 |
+| gpt-5.4-nano (reasoning off) | 0.518 | 0.994 | 0.589 |
+| **DeepSeek-V3.2** | **0.584** | 0.917 | **0.744** |
+
+gpt-4.1-nano was measured in an earlier pass (F1 0.470, axis 0.589, state
+0.440) and dropped as a legacy tier. **Decision: DeepSeek-V3.2 for both
+extraction and adjudication** — best fact extraction and best end-to-end
+state accuracy, axis classification within noise of the best. One
+observation worth an ablation later: gpt-5.4-nano with reasoning off
+classifies the update-vs-correction axis near-perfectly (0.994) while
+being mediocre at chain extraction — routing `classify(e)` to it as a
+separate cheap call is a viable split-role design if adjudication axis
+errors show up downstream. Caveats: measured on canned probe surface
+(re-measure after the paraphrase pass before quoting in the paper);
+absolute F1 for all candidates is capped by relation-vocabulary drift,
+a shared prompt-design ceiling, so the comparison, not the absolute
+level, is the finding.
 
 The 06/2026 GPT-5-nano cost experiment below is superseded by this bake-off
 (kept for the pricing history).

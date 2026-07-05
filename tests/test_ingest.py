@@ -127,6 +127,20 @@ def test_duplicate_statement_not_reinserted():
     assert len(ing.graph.edges) == 1
 
 
+def test_redundant_retraction_spares_replacement():
+    """Replacement fact and retraction of the old fact in one batch: the
+    retraction must not fall through to the freshly inserted replacement."""
+    ing = Ingestor()
+    ing.ingest_facts([fact("user", "works_at", "Acme")], "t1")
+    report = ing.ingest_facts([fact("user", "works_at", "Apex")], "t2")
+    ing.apply_retractions([{
+        "subject": "user", "relation": "works_at",
+        "object": "Acme", "was_wrong": False,
+    }], report)
+    active = ing.graph.find(subject="user", relation="works_at")
+    assert [e.object for e in active] == ["Apex"]
+
+
 def test_decisions_are_logged_for_h5():
     det = ConflictDetector()
     ing = Ingestor(detector=det)

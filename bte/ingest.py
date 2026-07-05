@@ -86,6 +86,14 @@ class Ingestor:
                  if e.object.lower() == r["object"].lower()]
         if exact:
             return exact
+        # object matches an edge already superseded (e.g. by a replacement
+        # fact in the same batch): the retraction is redundant, not a
+        # license to hit whatever now occupies the slot
+        everything = self.graph.find(subject=r["subject"],
+                                     relation=r["relation"],
+                                     active_only=False)
+        if any(e.object.lower() == r["object"].lower() for e in everything):
+            return []
         # a lone slot occupant is unambiguous even if the object spelling
         # drifted between the known-facts rendering and the model's copy
         return candidates if len(candidates) == 1 else []
