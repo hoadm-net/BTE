@@ -1,0 +1,9 @@
+[project]
+name = "bte"
+version = "0.0.1"
+description = "Bitemporal contradiction propagation for conversational memory (research code)"
+requires-python = ">=3.12"
+dependencies = [
+    "mem0ai>=2.0.11",
+    "openai>=2.44.0",
+]

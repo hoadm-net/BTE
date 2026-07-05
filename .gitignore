@@ -1,1 +1,4 @@
 .plan/
+data/
+.venv/
+.env
