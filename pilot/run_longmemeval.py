@@ -35,8 +35,17 @@ def bjg_factory(extractor: CachedLLM, reader: CachedLLM):
     return make
 
 
+def mem0_factory(reader: CachedLLM):
+    from bte.baselines.mem0_adapter import Mem0Memory
+
+    def make():
+        return Mem0Memory(reader=reader.complete_text)
+    return make
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--system", default="bjg", choices=["bjg", "mem0"])
     ap.add_argument("--limit", type=int, default=5)
     ap.add_argument("--category", default=None)
     ap.add_argument("--seed", type=int, default=20260705)
@@ -44,11 +53,19 @@ def main():
     args = ap.parse_args()
 
     questions = load_longmemeval(DATA)
+    rng = random.Random(args.seed)
     if args.category:
-        questions = [q for q in questions
-                     if q["question_type"] == args.category]
-    random.Random(args.seed).shuffle(questions)
-    questions = questions[:args.limit]
+        cats = args.category.split(",")
+        per_cat = max(1, args.limit // len(cats))
+        picked = []
+        for c in cats:
+            pool = [q for q in questions if q["question_type"] == c]
+            rng.shuffle(pool)
+            picked += pool[:per_cat]
+        questions = picked
+    else:
+        rng.shuffle(questions)
+        questions = questions[:args.limit]
 
     extractor = CachedLLM(model="deepseek/deepseek-v3.2",
                           base_url="https://openrouter.ai/api/v1",
@@ -59,11 +76,14 @@ def main():
                        api_key_env="OPENROUTER_API_KEY")
     judge = Judge(CachedLLM(model="gpt-5", temperature=None))
 
+    factory = (mem0_factory(reader) if args.system == "mem0"
+               else bjg_factory(extractor, reader))
+
     import os
     os.makedirs(".plan/results/runs", exist_ok=True)
     records = run_benchmark(
-        bjg_factory(extractor, reader), questions, judge,
-        system="bjg", out_path=OUT, max_workers=args.workers)
+        factory, questions, judge,
+        system=args.system, out_path=OUT, max_workers=args.workers)
     print(json.dumps(summarize(records), indent=1))
     for r in records:
         flag = "OK " if r.correct else "MISS"

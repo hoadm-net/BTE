@@ -171,8 +171,14 @@ def summarize(records: list[QARecord]) -> dict:
             sum(r.correct for r in records) / len(records), 3)
         if records else None,
         "errors": sum(1 for r in records if r.error),
+        "ingest_errors": sum(r.ingest_errors for r in records),
         "by_category": {
             c: f"{sum(r.correct for r in rs)}/{len(rs)}"
             for c, rs in sorted(by_cat.items())
+        },
+        "gold_in_graph": {
+            "yes": sum(1 for r in records if r.gold_in_graph is True),
+            "no": sum(1 for r in records if r.gold_in_graph is False),
+            "n/a": sum(1 for r in records if r.gold_in_graph is None),
         },
     }
