@@ -49,7 +49,6 @@ def main():
     for eid, e in ing.graph.edges.items():
         text = f"{e.subject} {e.relation} {e.object}".lower()
         if any(k in text for k in keywords):
-            s = ing.graph.status(eid)
             flag = "ACTIVE" if ing.graph.is_active(eid) else "superseded"
             print(f"  ({e.subject} | {e.relation} | {e.object}) "
                   f"[{flag}] t={e.t_transaction}")

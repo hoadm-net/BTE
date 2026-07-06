@@ -52,7 +52,8 @@ def main():
 
     extractor = CachedLLM(model="deepseek/deepseek-v3.2",
                           base_url="https://openrouter.ai/api/v1",
-                          api_key_env="OPENROUTER_API_KEY")
+                          api_key_env="OPENROUTER_API_KEY",
+                          extra={"max_tokens": 4000})
     reader = CachedLLM(model="qwen/qwen3.5-9b",
                        base_url="https://openrouter.ai/api/v1",
                        api_key_env="OPENROUTER_API_KEY")

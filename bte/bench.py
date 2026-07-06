@@ -51,6 +51,15 @@ class QARecord:
     answer_seconds: float
     approx_input_tokens: int
     error: Optional[str] = None
+    # short-gold heuristic: did the gold value make it into the graph at
+    # all? Separates extraction misses from retrieval/reader misses at
+    # scale. None when the gold is too long for substring matching or
+    # the memory does not expose a graph.
+    gold_in_graph: Optional[bool] = None
+    # sessions whose ingestion failed (poisoned provider responses):
+    # skipped, not fatal - a lost session degrades memory, it does not
+    # invalidate the question
+    ingest_errors: int = 0
 
 
 def load_longmemeval(path: str) -> list[dict]:
@@ -87,14 +96,19 @@ def run_longmemeval_question(
     sessions = q["haystack_sessions"]
     dates = q.get("haystack_dates") or [""] * len(sessions)
     approx_tokens = 0
+    ingest_errors = 0
     t0 = time.monotonic()
     error = None
     try:
         for session, date in zip(sessions, dates):
             text = render_session(session)
             approx_tokens += len(text) // 4
-            memory.ingest_session([text], date or "unknown")
+            try:
+                memory.ingest_session([text], date or "unknown")
+            except Exception:
+                ingest_errors += 1
         t1 = time.monotonic()
+        gold_in_graph = _gold_in_graph(memory, str(q["answer"]))
         answer = memory.answer(q["question"],
                                reference_time=q.get("question_date"))
         t2 = time.monotonic()
@@ -102,6 +116,7 @@ def run_longmemeval_question(
     except Exception as exc:
         t1 = t2 = time.monotonic()
         answer, correct = "", False
+        gold_in_graph = None
         error = f"{type(exc).__name__}: {exc}"
     return QARecord(
         system=system, benchmark="longmemeval_s",
@@ -112,7 +127,19 @@ def run_longmemeval_question(
         answer_seconds=round(t2 - t1, 2),
         approx_input_tokens=approx_tokens,
         error=error,
+        gold_in_graph=gold_in_graph,
+        ingest_errors=ingest_errors,
     )
+
+
+def _gold_in_graph(memory, gold: str) -> Optional[bool]:
+    graph = getattr(getattr(memory, "ingestor", None), "graph", None)
+    if graph is None or len(gold) > 40:
+        return None
+    needle = gold.strip().lower()
+    return any(
+        needle in f"{e.subject} {e.relation} {e.object}".lower()
+        for e in graph.edges.values())
 
 
 def run_benchmark(

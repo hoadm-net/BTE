@@ -79,7 +79,8 @@ def test_qarecord_schema_stable():
     fields = set(QARecord.__dataclass_fields__)
     assert {"system", "benchmark", "category", "question_id", "correct",
             "model_answer", "gold", "ingest_seconds", "answer_seconds",
-            "approx_input_tokens", "error"} == fields
+            "approx_input_tokens", "error", "gold_in_graph",
+            "ingest_errors"} == fields
 
 
 def test_extract_json_variants():
