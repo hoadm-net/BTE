@@ -81,10 +81,20 @@ class ConflictDetector:
     adjudicate: Optional[Callable[[Edge, Edge], dict]] = None
     functional: Optional[set[str]] = None  # None = treat all as functional
     log: list[Decision] = field(default_factory=list)
+    # relations the adjudicator has repeatedly judged non-conflicting
+    # (multi-valued, e.g. watchlist items): skip further checks. On
+    # open-domain data, checking every same-slot pair otherwise makes
+    # adjudication quadratic in slot size.
+    learned_multivalued: set[str] = field(default_factory=set)
+    _nonconflict_strikes: dict[str, int] = field(default_factory=dict)
+    multivalued_after: int = 2
 
     def check(self, g: BJG, new_edge: Edge,
               is_correction: bool = False) -> list[Decision]:
         decisions = []
+        if (not is_correction
+                and new_edge.relation in self.learned_multivalued):
+            return decisions
         for old in g.find(subject=new_edge.subject,
                           relation=new_edge.relation):
             if old.object == new_edge.object:
@@ -101,7 +111,13 @@ class ConflictDetector:
             elif self.adjudicate is not None:
                 verdict = self.adjudicate(new_edge, old)
                 d = Decision(new_edge.id, old.id, bool(verdict["conflict"]),
-                             verdict["axis"], "llm", inherited)
+                             verdict.get("axis"), "llm", inherited)
+                if not d.conflict:
+                    rel = new_edge.relation
+                    strikes = self._nonconflict_strikes.get(rel, 0) + 1
+                    self._nonconflict_strikes[rel] = strikes
+                    if strikes >= self.multivalued_after:
+                        self.learned_multivalued.add(rel)
             else:
                 # functional slot + overlapping window and no adjudicator:
                 # recency-wins update is the conservative default

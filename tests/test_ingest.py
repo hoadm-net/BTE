@@ -149,3 +149,24 @@ def test_decisions_are_logged_for_h5():
     assert len(det.log) == 1
     d = det.log[0]
     assert isinstance(d, Decision) and d.conflict and d.via == "cheap"
+
+
+def test_detector_learns_multivalued_relations():
+    from bte.graph import BJG, Edge as E
+    calls = []
+
+    def fake_adjudicate(new, old):
+        calls.append((new.id, old.id))
+        return {"conflict": False, "axis": None, "reason": "multi-valued"}
+
+    det = ConflictDetector(adjudicate=fake_adjudicate, multivalued_after=2)
+    g = BJG()
+    for i, title in enumerate(["Dune", "Arrival", "Contact", "Solaris"]):
+        e = E(id=f"w{i}", subject="user", relation="wants_to_watch",
+              object=title)
+        g.add_asserted(e)
+        det.check(g, e)
+    # strikes at items 2 and 3 (1 + 2 adjudications), then relation is
+    # marked multi-valued and item 4 skips adjudication entirely
+    assert "wants_to_watch" in det.learned_multivalued
+    assert len(calls) == 3

@@ -98,10 +98,18 @@ def normalize(term: str) -> str:
     return term.strip("_")
 
 
-def _norm_triple(t: dict) -> dict:
-    t["subject"] = normalize(t["subject"])
-    t["relation"] = normalize(t["relation"])
-    t["object"] = t["object"].strip()
+def _norm_triple(t) -> dict | None:
+    """Models occasionally emit null entries or null fields inside the
+    facts array; drop anything that is not a complete triple."""
+    if not isinstance(t, dict):
+        return None
+    s, r, o = t.get("subject"), t.get("relation"), t.get("object")
+    if not (isinstance(s, str) and isinstance(r, str)
+            and isinstance(o, str) and s and r and o.strip()):
+        return None
+    t["subject"] = normalize(s)
+    t["relation"] = normalize(r)
+    t["object"] = o.strip()
     return t
 
 
@@ -117,10 +125,13 @@ def extract_facts(llm: CachedLLM, text: str, reference_date: str,
         "extraction",
         EXTRACTION_SCHEMA,
     )
-    for f in data.get("facts", []):
-        _norm_triple(f)
-        for p in f["premises"]:
-            _norm_triple(p)
-    for r in data.get("retractions", []):
-        _norm_triple(r)
-    return data
+    facts = []
+    for f in data.get("facts") or []:
+        if _norm_triple(f) is None:
+            continue
+        f["premises"] = [p for p in (f.get("premises") or [])
+                         if _norm_triple(p) is not None]
+        facts.append(f)
+    retractions = [r for r in data.get("retractions") or []
+                   if _norm_triple(r) is not None]
+    return {"facts": facts, "retractions": retractions}

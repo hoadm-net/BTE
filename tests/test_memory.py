@@ -56,3 +56,15 @@ def test_empty_memory_answers_unknown_without_reader_call():
     mem, reader = build_memory()
     assert mem.answer("anything?") == "unknown"
     assert reader.prompts == []
+
+
+def test_supersession_history_rendered_for_change_questions():
+    mem, reader = build_memory()
+    mem.ingest_structured([fact("user", "coffee_limit", "one cup")], [],
+                          "2026-06-01")
+    mem.ingest_structured([fact("user", "coffee_limit", "two cups")], [],
+                          "2026-06-02")
+    mem.answer("did the user's coffee limit increase?")
+    prompt = reader.prompts[-1]
+    assert "two cups" in prompt
+    assert "previously: one cup" in prompt

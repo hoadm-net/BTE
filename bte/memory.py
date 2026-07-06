@@ -21,6 +21,10 @@ from .retrieval import Retriever
 
 READER_SYSTEM = (
     "You answer questions about a user from their memory facts.\n"
+    "Facts may carry a change history in parentheses: "
+    "'(previously: X, recorded DATE)' means the value was X before being "
+    "updated - use it for questions about what changed, or increased vs "
+    "decreased.\n"
     "Use ONLY the facts given. If the facts do not determine the answer, "
     "reply exactly: unknown"
 )
@@ -33,17 +37,29 @@ class MemorySystem(Protocol):
                reference_time: Optional[str] = None) -> str: ...
 
 
-def render_fact(e: Edge) -> str:
+def render_fact(e: Edge, graph=None, max_history: int = 3) -> str:
     window = ""
     if e.t_valid_start or e.t_valid_end:
         window = f" (valid {e.t_valid_start or '...'} to {e.t_valid_end or 'now'})"
-    return f"- {e.subject} | {e.relation} | {e.object}{window}"
+    history = ""
+    if graph is not None:
+        prev_id, hops = e.supersedes, 0
+        parts = []
+        while prev_id and prev_id in graph.edges and hops < max_history:
+            prev = graph.edges[prev_id]
+            parts.append(f"previously: {prev.object}"
+                         + (f", recorded {prev.t_transaction}"
+                            if prev.t_transaction else ""))
+            prev_id, hops = prev.supersedes, hops + 1
+        if parts:
+            history = " (" + "; ".join(parts) + ")"
+    return f"- {e.subject} | {e.relation} | {e.object}{window}{history}"
 
 
 class BJGMemory:
     def __init__(self, ingestor: Ingestor, retriever: Retriever,
                  reader: Callable[[str, str], str],
-                 k: int = 8) -> None:
+                 k: int = 12) -> None:
         self.ingestor = ingestor
         self.retriever = retriever
         self.reader = reader
@@ -61,7 +77,8 @@ class BJGMemory:
         hits = self.retriever.retrieve(question, reference_time, k=self.k)
         if not hits:
             return "unknown"
-        rendered = "\n".join(render_fact(e) for e in hits)
+        rendered = "\n".join(
+            render_fact(e, graph=self.ingestor.graph) for e in hits)
         user = f"Facts:\n{rendered}\n\nQuestion: {question}"
         return self.reader(READER_SYSTEM, user).strip()
 

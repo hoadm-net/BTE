@@ -57,9 +57,11 @@ class Ingestor:
     def ingest_text(self, text: str, t_transaction: str) -> IngestReport:
         if self.extract is None:
             raise ValueError("no extractor configured")
+        # most recent active facts only: on benchmark-scale histories the
+        # full graph no longer fits usefully in the extraction context
         context = [
             f"({e.subject}, {e.relation}, {e.object})"
-            for e in self.graph.find()
+            for e in self.graph.find()[-150:]
         ]
         payload = self.extract(text, t_transaction, context)
         report = self.ingest_facts(payload.get("facts", []), t_transaction)
