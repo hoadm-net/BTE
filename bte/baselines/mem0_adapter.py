@@ -12,13 +12,23 @@ runs do not leak across questions and can go in parallel.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import uuid
 from typing import Callable, Optional
 
-from mem0 import Memory
+# Mem0 also opens a fixed-path telemetry vector store at import/init time
+# (~/.mem0/migrations_<provider>) regardless of the config passed to
+# Memory.from_config, which lock-collides across concurrent instances
+# (observed: RuntimeError from qdrant_local under --workers > 1). Disabling
+# telemetry is the documented way to skip that store entirely, not a
+# workaround for our isolation - the shared path is Mem0's own design, not
+# something our config controls.
+os.environ.setdefault("MEM0_TELEMETRY", "False")
 
-from ..memory import READER_SYSTEM
+from mem0 import Memory  # noqa: E402
+
+from ..memory import READER_SYSTEM  # noqa: E402
 
 
 class Mem0Memory:
