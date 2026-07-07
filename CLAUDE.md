@@ -53,6 +53,29 @@ Docs and commits in this repo are not the place for that scrutiny to trip:
   inline in a commit or left as a comment describing "what we found."
 - No emoji, anywhere in this repo.
 
+## Git workflow: push only after the work is settled
+
+Local commits during a work session are fine as checkpoints. Pushing to
+`origin` is not automatic and not a formality — it is the point where work
+becomes visible to a collaborator, so it only happens after all of the
+following are true:
+
+- The task/phase in progress is actually finished, not partway (a script
+  that still errors on one path, a run that hasn't been rerun after a fix,
+  an adapter that hasn't been smoke-tested — none of that is done).
+- Results have been analyzed in enough detail to state what they mean, not
+  just that a command exited 0 (accuracy alone is not analysis; layer
+  attribution, comparison to a baseline, or a plausible explanation for the
+  number is).
+- The analysis has been discussed with the user and the user has agreed —
+  not "I'll push now and we can revisit," an explicit go-ahead first.
+
+Pushing early on the assumption that a follow-up push will "fix it later"
+is the failure mode this rule exists to prevent: a premature push that
+turns out wrong is not a quick fixup, it is a rollback, which costs more
+than waiting would have. When in doubt, keep working locally and surface
+the state of things in conversation before pushing.
+
 ## Verifying claims before writing them
 
 Several docs pin numbers to a specific month (e.g. models.md's pricing table
