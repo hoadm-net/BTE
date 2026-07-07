@@ -21,7 +21,11 @@ from .retrieval import Retriever
 
 READER_SYSTEM = (
     "You answer questions about a user from their memory facts.\n"
-    "Facts may carry a change history in parentheses: "
+    "Each fact ends with '(recorded DATE)' - the date the user said it, not "
+    "necessarily when the described event happened. Use it against the "
+    "current date given below for questions about elapsed time ('how long "
+    "ago', 'X days/weeks/months before Y') - compute the actual arithmetic, "
+    "do not guess. Facts may also carry change history in parentheses: "
     "'(previously: X, recorded DATE)' means the value was X before being "
     "updated - use it for questions about what changed, or increased vs "
     "decreased.\n"
@@ -41,18 +45,18 @@ def render_fact(e: Edge, graph=None, max_history: int = 3) -> str:
     window = ""
     if e.t_valid_start or e.t_valid_end:
         window = f" (valid {e.t_valid_start or '...'} to {e.t_valid_end or 'now'})"
-    history = ""
+    parts = []
+    if e.t_transaction:
+        parts.append(f"recorded {e.t_transaction}")
     if graph is not None:
         prev_id, hops = e.supersedes, 0
-        parts = []
         while prev_id and prev_id in graph.edges and hops < max_history:
             prev = graph.edges[prev_id]
             parts.append(f"previously: {prev.object}"
                          + (f", recorded {prev.t_transaction}"
                             if prev.t_transaction else ""))
             prev_id, hops = prev.supersedes, hops + 1
-        if parts:
-            history = " (" + "; ".join(parts) + ")"
+    history = " (" + "; ".join(parts) + ")" if parts else ""
     return f"- {e.subject} | {e.relation} | {e.object}{window}{history}"
 
 
@@ -79,7 +83,8 @@ class BJGMemory:
             return "unknown"
         rendered = "\n".join(
             render_fact(e, graph=self.ingestor.graph) for e in hits)
-        user = f"Facts:\n{rendered}\n\nQuestion: {question}"
+        today = f"Current date: {reference_time}\n" if reference_time else ""
+        user = f"{today}Facts:\n{rendered}\n\nQuestion: {question}"
         return self.reader(READER_SYSTEM, user).strip()
 
     # -- LLM-free path for tests and structured replay ---------------------

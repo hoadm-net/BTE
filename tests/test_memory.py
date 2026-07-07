@@ -68,3 +68,27 @@ def test_supersession_history_rendered_for_change_questions():
     prompt = reader.prompts[-1]
     assert "two cups" in prompt
     assert "previously: one cup" in prompt
+    assert "recorded 2026-06-02" in prompt  # current fact's own record date
+
+
+def test_recorded_date_and_current_date_exposed_for_date_arithmetic():
+    """A date-elapsed question needs both when the fact was recorded and
+    what 'today' is - neither was visible to the reader before (bench.py
+    30-question slice: 6/14 temporal-reasoning misses were pure date
+    arithmetic with the needed fact already retrieved)."""
+    mem, reader = build_memory()
+    mem.ingest_structured(
+        [fact("user", "started_lessons_for", "ukulele")], [], "2023-02-01")
+    mem.answer("How long ago did the user start ukulele lessons?",
+              reference_time="2023-04-01")
+    prompt = reader.prompts[-1]
+    assert "Current date: 2023-04-01" in prompt
+    assert "recorded 2023-02-01" in prompt
+
+
+def test_no_current_date_line_when_reference_time_absent():
+    mem, reader = build_memory()
+    mem.ingest_structured([fact("user", "lives_in", "Seattle")], [],
+                          "2026-06-01")
+    mem.answer("where does the user live?")
+    assert "Current date:" not in reader.prompts[-1]
