@@ -8,6 +8,7 @@ summary. Systems: bjg (ours). Baseline adapters land in Phase 3 proper.
 
 import argparse
 import json
+import os
 import random
 
 from bte.bench import Judge, load_longmemeval, run_benchmark, summarize
@@ -43,6 +44,34 @@ def mem0_factory(reader: CachedLLM):
     return make
 
 
+def already_done(out_path: str, system: str,
+                 max_ingest_errors: int = 3) -> set[str]:
+    """question_ids with a genuinely usable record for this system.
+    Baselines with no call-level cache of their own (Mem0's internal
+    extraction is not routed through CachedLLM) redo real, billed work
+    on every rerun otherwise - a crash partway through a 100-question run
+    should not mean re-paying for the ones that already succeeded.
+
+    error=None alone is not enough: a session-level failure inside
+    ingest_session is caught per-session (bench.py), so a question can
+    finish with no top-level error while most of its sessions were
+    silently dropped (observed: an OpenRouter outage mid-run left ~30
+    'successful' mem0 records with 40+ of ~48 sessions skipped, all
+    answering 'unknown' from a near-empty memory) - those are not done,
+    they are quietly-corrupted and must be redone.
+    """
+    if not os.path.exists(out_path):
+        return set()
+    done = set()
+    with open(out_path) as f:
+        for line in f:
+            r = json.loads(line)
+            if (r["system"] == system and not r.get("error")
+                    and r.get("ingest_errors", 0) <= max_ingest_errors):
+                done.add(r["question_id"])
+    return done
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--system", default="bjg", choices=["bjg", "mem0"])
@@ -50,6 +79,9 @@ def main():
     ap.add_argument("--category", default=None)
     ap.add_argument("--seed", type=int, default=20260705)
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--no-resume", action="store_true",
+                    help="reprocess every selected question even if a "
+                         "successful record already exists")
     args = ap.parse_args()
 
     questions = load_longmemeval(DATA)
@@ -66,6 +98,17 @@ def main():
     else:
         rng.shuffle(questions)
         questions = questions[:args.limit]
+
+    if not args.no_resume:
+        done = already_done(OUT, args.system)
+        remaining = [q for q in questions
+                     if str(q["question_id"]) not in done]
+        print(f"resume: {len(done & {str(q['question_id']) for q in questions})} "
+              f"already done, {len(remaining)} remaining")
+        questions = remaining
+        if not questions:
+            print("nothing left to run")
+            return
 
     extractor = CachedLLM(model="deepseek/deepseek-v3.2",
                           base_url="https://openrouter.ai/api/v1",

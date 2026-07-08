@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 from bte.bench import (QARecord, render_session, run_benchmark,
                        run_longmemeval_question, summarize)
@@ -69,6 +71,58 @@ def test_run_benchmark_writes_jsonl_and_summary(tmp_path):
     s = summarize(records)
     assert s["accuracy"] == 1.0
     assert s["by_category"] == {"knowledge-update": "2/2"}
+
+
+def test_run_benchmark_writes_incrementally_not_at_the_end(tmp_path):
+    """A crash partway through a large run must not lose the questions
+    that had already finished - each record is flushed to disk as its
+    own question completes, not buffered until the whole batch is done.
+    Whichever of the two factory calls happens second is made to block,
+    regardless of which question it ends up answering, so the test does
+    not depend on the thread pool's internal scheduling order."""
+    out = tmp_path / "res.jsonl"
+    release_blocked = threading.Event()
+    call_count = {"n": 0}
+    count_lock = threading.Lock()
+
+    class SlowMemory(StubMemory):
+        def __init__(self, blocks):
+            super().__init__("ok")
+            self.blocks = blocks
+
+        def answer(self, question, reference_time=None):
+            if self.blocks:
+                release_blocked.wait(timeout=5)
+            return "ok"
+
+    def factory():
+        with count_lock:
+            call_count["n"] += 1
+            blocks = call_count["n"] == 2
+        return SlowMemory(blocks)
+
+    q1 = dict(QUESTION, question_id="q1")
+    q2 = dict(QUESTION, question_id="q2")
+
+    runner = threading.Thread(
+        target=run_benchmark,
+        args=(factory, [q1, q2], ExactJudge(), "stub", str(out)),
+        kwargs={"max_workers": 2},
+    )
+    runner.start()
+
+    seen = False
+    for _ in range(100):
+        if out.exists() and out.read_text().strip():
+            seen = True
+            break
+        time.sleep(0.05)
+
+    release_blocked.set()
+    runner.join(timeout=5)
+    assert seen, ("a finished question's record should already be on "
+                 "disk while another question is still running")
+    assert not runner.is_alive()
 
 
 def test_summarize_empty():

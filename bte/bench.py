@@ -11,6 +11,7 @@ cost metric (H4).
 from __future__ import annotations
 
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -150,14 +151,24 @@ def run_benchmark(
     out_path: str,
     max_workers: int = 4,
 ) -> list[QARecord]:
+    """Writes each record to disk as soon as it finishes (not buffered
+    until the whole batch completes) so a killed process - or one worker
+    hanging on a slow provider call - does not lose already-finished
+    questions. A per-write lock keeps the file consistent across the
+    thread pool's workers."""
+    records: list[QARecord] = []
+    lock = threading.Lock()
+
+    def run_and_write(q: dict) -> QARecord:
+        r = run_longmemeval_question(memory_factory, q, judge, system)
+        with lock:
+            with open(out_path, "a") as f:
+                f.write(json.dumps(asdict(r)) + "\n")
+        return r
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        records = list(pool.map(
-            lambda q: run_longmemeval_question(
-                memory_factory, q, judge, system),
-            questions))
-    with open(out_path, "a") as f:
-        for r in records:
-            f.write(json.dumps(asdict(r)) + "\n")
+        for r in pool.map(run_and_write, questions):
+            records.append(r)
     return records
 
 
