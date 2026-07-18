@@ -19,6 +19,8 @@ from typing import Optional
 
 from openai import OpenAI
 
+from ._util import atomic_write_text
+
 
 class CachedLLM:
     def __init__(
@@ -60,15 +62,19 @@ class CachedLLM:
             json.dumps(payload, sort_keys=True).encode()).hexdigest()
         path = self.cache_dir / f"{digest}.json"
         if path.exists():
-            with self._lock:
-                self.cache_hits += 1
-            return json.loads(path.read_text())
+            try:
+                cached = json.loads(path.read_text())
+                with self._lock:
+                    self.cache_hits += 1
+                return cached
+            except json.JSONDecodeError:
+                pass  # corrupted cache entry: fall through and regenerate
 
         with self._lock:
             self.calls += 1
         data = self._request(payload, schema_name, schema)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=1))
+        atomic_write_text(path, json.dumps(data, indent=1))
         return data
 
     def _create(self, attempts: int = 3, **kwargs):
@@ -78,7 +84,16 @@ class CachedLLM:
             kwargs.setdefault("temperature", self.temperature)
         for i in range(attempts):
             try:
-                return self._client.chat.completions.create(**kwargs)
+                resp = self._client.chat.completions.create(**kwargs)
+                if not getattr(resp, "choices", None):
+                    # OpenRouter provider hiccups can surface as an HTTP
+                    # 200 whose body has choices=null plus an error field;
+                    # subscripting that crashed ingestion (observed as
+                    # TypeError on STALE sessions). Treat as transient.
+                    raise RuntimeError(
+                        "provider returned no choices: "
+                        f"{getattr(resp, 'error', None)}")
+                return resp
             except Exception:
                 if i == attempts - 1:
                     raise
@@ -99,16 +114,20 @@ class CachedLLM:
             json.dumps(payload, sort_keys=True).encode()).hexdigest()
         path = self.cache_dir / f"{digest}.json"
         if path.exists():
-            with self._lock:
-                self.cache_hits += 1
-            return json.loads(path.read_text())["text"]
+            try:
+                cached_text = json.loads(path.read_text())["text"]
+                with self._lock:
+                    self.cache_hits += 1
+                return cached_text
+            except json.JSONDecodeError:
+                pass  # corrupted cache entry: fall through and regenerate
         with self._lock:
             self.calls += 1
         resp = self._create(
             model=self.model, messages=payload["messages"], **self.extra)
         text = resp.choices[0].message.content or ""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"text": text}))
+        atomic_write_text(path, json.dumps({"text": text}))
         return text
 
     @staticmethod
@@ -148,8 +167,11 @@ class CachedLLM:
     def _request(self, payload: dict, schema_name: str, schema: dict) -> dict:
         if not self._schema_unsupported:
             try:
+                # attempts=2: one retry covers transient no-choices
+                # bodies; a genuine schema-unsupported 400 just fails
+                # twice quickly before latching _schema_unsupported
                 resp = self._create(
-                    attempts=1,
+                    attempts=2,
                     model=self.model,
                     messages=payload["messages"],
                     response_format={

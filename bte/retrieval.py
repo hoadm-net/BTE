@@ -22,6 +22,7 @@ from typing import Optional, Protocol
 
 from openai import OpenAI
 
+from ._util import atomic_write_text
 from .graph import BJG, Edge
 
 
@@ -74,16 +75,20 @@ class CachedEmbedder:
         for i, t in enumerate(texts):
             p = self._path(t)
             if p.exists():
-                out[i] = json.loads(p.read_text())
-            else:
-                missing.append(i)
+                try:
+                    out[i] = json.loads(p.read_text())
+                    continue
+                except json.JSONDecodeError:
+                    pass  # corrupted cache entry: regenerate below
+            missing.append(i)
         if missing:
             resp = self._client.embeddings.create(
                 model=self.model, input=[texts[i] for i in missing])
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             for slot, item in zip(missing, resp.data):
                 out[slot] = item.embedding
-                self._path(texts[slot]).write_text(json.dumps(item.embedding))
+                atomic_write_text(self._path(texts[slot]),
+                                  json.dumps(item.embedding))
         return out  # type: ignore[return-value]
 
 
