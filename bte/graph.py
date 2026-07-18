@@ -32,6 +32,9 @@ class Edge:
     confidence: float = 1.0
     justification: tuple[frozenset[str], ...] = field(default_factory=tuple)
     supersedes: Optional[str] = None
+    # coarse life-domain type (extraction.DOMAINS); drives domain-level
+    # conflict candidate generation in conflict.DomainDependencies
+    domain: Optional[str] = None
 
 
 class BJG:

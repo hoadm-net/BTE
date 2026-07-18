@@ -63,11 +63,18 @@ def render_fact(e: Edge, graph=None, max_history: int = 3) -> str:
 class BJGMemory:
     def __init__(self, ingestor: Ingestor, retriever: Retriever,
                  reader: Callable[[str, str], str],
-                 k: int = 12) -> None:
+                 k: int = 12,
+                 reader_system: str = READER_SYSTEM) -> None:
+        # reader_system is per-benchmark: LongMemEval's protocol expects
+        # abstention on unanswerable questions (the default's "reply
+        # unknown" clause), STALE's response-generation prompts have no
+        # such clause (arXiv 2605.06527 Appendix E.1) - a runner aligns
+        # the reader with the benchmark's own protocol, not vice versa.
         self.ingestor = ingestor
         self.retriever = retriever
         self.reader = reader
         self.k = k
+        self.reader_system = reader_system
 
     # -- MemorySystem -----------------------------------------------------
 
@@ -85,7 +92,7 @@ class BJGMemory:
             render_fact(e, graph=self.ingestor.graph) for e in hits)
         today = f"Current date: {reference_time}\n" if reference_time else ""
         user = f"{today}Facts:\n{rendered}\n\nQuestion: {question}"
-        return self.reader(READER_SYSTEM, user).strip()
+        return self.reader(self.reader_system, user).strip()
 
     # -- LLM-free path for tests and structured replay ---------------------
 

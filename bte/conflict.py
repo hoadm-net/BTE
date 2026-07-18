@@ -7,6 +7,43 @@ inherited-window conflicts are caught (the check Engram-style pipelines
 skip). Axis: extraction's is_correction flag when present, else LLM
 adjudication. Every decision is logged for the classify(e) reliability
 measurement (H5).
+
+Same-relation matching alone misses *implicit* conflicts where a new
+fact contradicts an existing one under a different relation entirely
+(observed on STALE T2: "works overnight at a hotel" never gets compared
+against "needs to limit daily commitments" — no shared slot, so the
+pair is never even escalated, and BBP has nothing to propagate because
+no conflict was ever detected upstream of it). The semantic candidate
+path below widens "cheap" from exact slot match to hybrid-retrieval-
+style top-k similarity search across the subject's other active facts,
+still escalating to the same LLM adjudicator used above — no new model,
+no training, grounded in the same two-stage retrieve-then-classify
+pattern used for open-KB contradiction detection (Chen et al., *A
+Straightforward Pipeline for Targeted Entailment and Contradiction
+Detection*, 2025, https://arxiv.org/abs/2508.17127: attention/embedding-
+based candidate retrieval feeding an off-the-shelf NLI-style classifier,
+no fine-tuning). Multi-hop expansion (beam search over the candidate
+graph) is deliberately deferred: measure what single-hop retrieval
+closes on STALE T2 before adding that complexity.
+
+Embedding similarity, however, cannot see conflicts whose only link is
+commonsense (measured on STALE T2: the target pair "overnight hotel
+job" vs "limits commitments to manage symptoms" sits at cosine
+0.20-0.32 while genuinely-caught pairs cluster at 0.54+; MemStrata,
+arXiv 2606.26511, independently reports AUROC 0.59 — near chance — for
+cosine on contradiction-vs-duplicate). The domain path fixes this the
+way working 2026 systems converge on: represent dependency structurally
+at the TYPE level, not discover it pairwise at the instance level.
+Facts carry a coarse life-domain type (extraction.DOMAINS); a small
+directed domain-dependency graph (commonsense prior, ~35 edges) gates
+which OTHER-domain facts a new fact could implicitly invalidate, and
+one batched proposer call per new fact replaces per-pair adjudication.
+Two deltas over CUPMem's fixed schema + per-call extrapolation (STALE,
+arXiv 2605.06527, Appendix F): the dependency graph LEARNS online —
+every confirmed cross-domain conflict (from any path) strengthens that
+domain pair, so coverage grows past the prior — and confirmed conflicts
+feed the same supersession + BBP machinery, whose propagation is proven
+(formalism.md Theorem 2) rather than re-judged per query.
 """
 
 from __future__ import annotations
@@ -16,6 +53,7 @@ from typing import Callable, Optional
 
 from .graph import BJG, Edge
 from .llm import CachedLLM
+from .retrieval import Embedder, cosine, edge_text
 
 UPDATE = "update"
 CORRECTION = "correction"
@@ -31,14 +69,126 @@ ADJUDICATION_SCHEMA = {
     "additionalProperties": False,
 }
 
-ADJUDICATION_PROMPT = """Two recorded facts about the same subject and relation:
+# Directed commonsense prior: a new fact in the KEY domain may implicitly
+# invalidate older facts in the VALUE domains. Authored as generic
+# everyday-life knowledge before any benchmark run; the learned layer in
+# DomainDependencies extends it online from confirmed conflicts.
+DOMAIN_DEPENDENCY_PRIOR: dict[str, frozenset[str]] = {
+    "work_or_study": frozenset({
+        "health", "schedule_and_routine", "finance_and_resources",
+        "location_and_residence", "transport_and_commute", "plans_and_goals"}),
+    "location_and_residence": frozenset({
+        "transport_and_commute", "schedule_and_routine", "work_or_study",
+        "preferences_and_habits", "plans_and_goals"}),
+    "health": frozenset({
+        "schedule_and_routine", "transport_and_commute", "work_or_study",
+        "preferences_and_habits", "plans_and_goals"}),
+    "family_and_social": frozenset({
+        "schedule_and_routine", "location_and_residence",
+        "finance_and_resources", "plans_and_goals"}),
+    "finance_and_resources": frozenset({
+        "plans_and_goals", "possessions_and_devices", "preferences_and_habits"}),
+    "schedule_and_routine": frozenset({"health", "plans_and_goals"}),
+    "transport_and_commute": frozenset({"schedule_and_routine", "plans_and_goals"}),
+    "possessions_and_devices": frozenset({
+        "preferences_and_habits", "schedule_and_routine"}),
+    "plans_and_goals": frozenset({"schedule_and_routine", "finance_and_resources"}),
+    "preferences_and_habits": frozenset({"plans_and_goals"}),
+}
+
+
+@dataclass
+class DomainDependencies:
+    """Domain-level dependency structure gating implicit-conflict search:
+    a static commonsense prior plus edges learned online from confirmed
+    cross-domain conflicts (the conflict-side dual of the detector's
+    learned_multivalued non-conflict pruning). The learned counts are an
+    inspectable artifact: which dependencies the data actually exercised.
+    """
+
+    prior: dict[str, frozenset[str]] = field(
+        default_factory=lambda: dict(DOMAIN_DEPENDENCY_PRIOR))
+    learned: dict[tuple[str, str], int] = field(default_factory=dict)
+    learn_after: int = 1
+
+    def affects(self, domain: Optional[str]) -> frozenset[str]:
+        if not domain:
+            return frozenset()
+        out = set(self.prior.get(domain, frozenset()))
+        for (a, b), n in self.learned.items():
+            if a == domain and n >= self.learn_after:
+                out.add(b)
+        return frozenset(out)
+
+    def record(self, new_domain: Optional[str],
+               old_domain: Optional[str]) -> None:
+        if not new_domain or not old_domain or new_domain == old_domain:
+            return
+        key = (new_domain, old_domain)
+        self.learned[key] = self.learned.get(key, 0) + 1
+
+
+PROPOSAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "conflicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "axis": {"type": "string", "enum": [UPDATE, CORRECTION]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["index", "axis", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["conflicts"],
+    "additionalProperties": False,
+}
+
+PROPOSAL_PROMPT = """A new fact about a subject was just recorded. Below it is a numbered list of older facts about the same subject from related life areas.
+
+NEW: {new}
+
+OLDER FACTS:
+{candidates}
+
+List ONLY the older facts that CANNOT still be true given the NEW fact:
+keeping both as currently-true would contradict how the world works.
+Include implicit contradictions - the NEW fact's real-world consequences
+(a changed job, schedule, location, health situation...) can rule an
+older fact out even when the two share no wording, e.g. a new overnight
+work schedule rules out an established early-morning routine.
+
+These are NOT conflicts - never list them:
+- a plan, method, or coping strategy for a situation, vs that situation
+  (advice about handling a schedule does not invalidate the schedule)
+- a one-off event vs a general routine or habit
+- plans, purchases, activities, or preferences that can coexist
+- earlier steps or variants of the same ongoing activity or project
+- facts that merely touch the same topic
+
+For each genuine conflict give its index and the axis: "correction" if
+the older fact was never true, "update" if the world changed. If you
+are not certain a pair is contradictory, leave it out. Return an empty
+list if none conflict."""
+
+ADJUDICATION_PROMPT = """Two recorded facts about the same subject (possibly different relations):
 
 OLD: {old}
 NEW: {new}
 
 Decide:
-- conflict: can both be simultaneously true (different objects, overlapping
-  validity)? If they are compatible (e.g. multi-valued relation), no conflict.
+- conflict: can both be simultaneously true? Consider both direct
+  contradiction (same relation, incompatible objects) and implicit
+  contradiction (the NEW fact's real-world implications rule out the
+  OLD fact, e.g. a detail that only makes sense in a different climate,
+  job, or life situation than the OLD fact describes). If they are
+  compatible (e.g. multi-valued relation, or unrelated topics), no
+  conflict.
 - axis: if conflict, was the OLD fact wrong from the start (correction),
   or did the world change (update)? null if no conflict."""
 
@@ -49,7 +199,7 @@ class Decision:
     old_edge_id: str
     conflict: bool
     axis: Optional[str]
-    via: str  # "cheap" | "llm"
+    via: str  # "cheap" | "llm" | "semantic" | "domain"
     inherited: bool  # old edge is derived (its window was inherited)
 
 
@@ -61,19 +211,43 @@ def windows_overlap(a: Edge, b: Edge) -> bool:
                 or before(b.t_valid_end, a.t_valid_start))
 
 
+def render_edge(e: Edge) -> str:
+    return (f"({e.subject}, {e.relation}, {e.object}) "
+            f"valid [{e.t_valid_start}, {e.t_valid_end}) "
+            f"recorded at {e.t_transaction}")
+
+
 def make_llm_adjudicator(llm: CachedLLM) -> Callable[[Edge, Edge], dict]:
     def adjudicate(new: Edge, old: Edge) -> dict:
-        def render(e: Edge) -> str:
-            return (f"({e.subject}, {e.relation}, {e.object}) "
-                    f"valid [{e.t_valid_start}, {e.t_valid_end}) "
-                    f"recorded at {e.t_transaction}")
         return llm.complete_json(
             "You adjudicate factual conflicts in a personal knowledge graph.",
-            ADJUDICATION_PROMPT.format(old=render(old), new=render(new)),
+            ADJUDICATION_PROMPT.format(old=render_edge(old),
+                                       new=render_edge(new)),
             "adjudication",
             ADJUDICATION_SCHEMA,
         )
     return adjudicate
+
+
+def make_llm_proposer(llm: CachedLLM) -> Callable[[Edge, list[Edge]], list[dict]]:
+    """One call covering the whole domain-gated candidate set (vs one
+    adjudication per pair on the semantic path)."""
+    def propose(new: Edge, candidates: list[Edge]) -> list[dict]:
+        listing = "\n".join(f"{i}. {render_edge(e)}"
+                            for i, e in enumerate(candidates))
+        data = llm.complete_json(
+            "You maintain consistency of a personal knowledge graph.",
+            PROPOSAL_PROMPT.format(new=render_edge(new), candidates=listing),
+            "conflict_proposal",
+            PROPOSAL_SCHEMA,
+        )
+        out = []
+        for c in data.get("conflicts") or []:
+            i = c.get("index")
+            if isinstance(i, int) and 0 <= i < len(candidates):
+                out.append(c)
+        return out
+    return propose
 
 
 @dataclass
@@ -88,42 +262,148 @@ class ConflictDetector:
     learned_multivalued: set[str] = field(default_factory=set)
     _nonconflict_strikes: dict[str, int] = field(default_factory=dict)
     multivalued_after: int = 2
+    # semantic candidate generation (see module docstring): None disables
+    # it entirely (existing same-slot behavior, unchanged).
+    embedder: Optional[Embedder] = None
+    semantic_top_k: int = 8
+    semantic_threshold: float = 0.5
+    # domain-typed candidate generation (see module docstring): both
+    # domain_deps and propose must be set to enable it.
+    domain_deps: Optional[DomainDependencies] = None
+    propose: Optional[Callable[[Edge, list[Edge]], list[dict]]] = None
+    domain_max_candidates: int = 60
 
     def check(self, g: BJG, new_edge: Edge,
               is_correction: bool = False) -> list[Decision]:
+        log_start = len(self.log)
         decisions = []
-        if (not is_correction
+        if not (not is_correction
                 and new_edge.relation in self.learned_multivalued):
-            return decisions
-        for old in g.find(subject=new_edge.subject,
-                          relation=new_edge.relation):
-            if old.object == new_edge.object:
-                continue
-            if (self.functional is not None
-                    and new_edge.relation not in self.functional):
-                continue
-            if not windows_overlap(old, new_edge):
-                continue
-            inherited = old.source_type == "derived"
-            if is_correction:
-                d = Decision(new_edge.id, old.id, True, CORRECTION,
-                             "cheap", inherited)
-            elif self.adjudicate is not None:
-                verdict = self.adjudicate(new_edge, old)
-                d = Decision(new_edge.id, old.id, bool(verdict["conflict"]),
-                             verdict.get("axis"), "llm", inherited)
-                if not d.conflict:
-                    rel = new_edge.relation
-                    strikes = self._nonconflict_strikes.get(rel, 0) + 1
-                    self._nonconflict_strikes[rel] = strikes
-                    if strikes >= self.multivalued_after:
-                        self.learned_multivalued.add(rel)
-            else:
-                # functional slot + overlapping window and no adjudicator:
-                # recency-wins update is the conservative default
-                d = Decision(new_edge.id, old.id, True, UPDATE,
-                             "cheap", inherited)
+            for old in g.find(subject=new_edge.subject,
+                              relation=new_edge.relation):
+                if old.object == new_edge.object:
+                    continue
+                if (self.functional is not None
+                        and new_edge.relation not in self.functional):
+                    continue
+                if not windows_overlap(old, new_edge):
+                    continue
+                inherited = old.source_type == "derived"
+                if is_correction:
+                    d = Decision(new_edge.id, old.id, True, CORRECTION,
+                                 "cheap", inherited)
+                elif self.adjudicate is not None:
+                    verdict = self.adjudicate(new_edge, old)
+                    d = Decision(new_edge.id, old.id,
+                                bool(verdict["conflict"]),
+                                verdict.get("axis"), "llm", inherited)
+                    if not d.conflict:
+                        rel = new_edge.relation
+                        strikes = self._nonconflict_strikes.get(rel, 0) + 1
+                        self._nonconflict_strikes[rel] = strikes
+                        if strikes >= self.multivalued_after:
+                            self.learned_multivalued.add(rel)
+                else:
+                    # functional slot + overlapping window, no
+                    # adjudicator: recency-wins update is the
+                    # conservative default
+                    d = Decision(new_edge.id, old.id, True, UPDATE,
+                                 "cheap", inherited)
+                self.log.append(d)
+                if d.conflict:
+                    decisions.append(d)
+
+        if self.embedder is not None and self.adjudicate is not None:
+            decisions += self._check_semantic(g, new_edge)
+        if self.domain_deps is not None and self.propose is not None:
+            # skip pairs already adjudicated this call (any verdict), so
+            # the two paths never double-charge the same pair
+            seen = {d.old_edge_id for d in self.log[log_start:]}
+            decisions += self._check_domain(g, new_edge, seen)
+        if self.domain_deps is not None:
+            for d in decisions:
+                old = g.edges[d.old_edge_id]
+                self.domain_deps.record(new_edge.domain, old.domain)
+        return decisions
+
+    def _check_semantic(self, g: BJG, new_edge: Edge) -> list[Decision]:
+        candidates = [e for e in g.find(subject=new_edge.subject)
+                     if e.relation != new_edge.relation
+                     and e.t_transaction != new_edge.t_transaction
+                     and windows_overlap(e, new_edge)]
+        if not candidates:
+            return []
+        vecs = self.embedder.embed(
+            [edge_text(e) for e in candidates] + [edge_text(new_edge)])
+        query_vec = vecs[-1]
+        ranked = sorted(zip(candidates, vecs[:-1]),
+                        key=lambda cv: -cosine(query_vec, cv[1]))
+        decisions = []
+        for old, vec in ranked[:self.semantic_top_k]:
+            if cosine(query_vec, vec) < self.semantic_threshold:
+                break
+            verdict = self.adjudicate(new_edge, old)
+            d = Decision(new_edge.id, old.id, bool(verdict["conflict"]),
+                        verdict.get("axis"), "semantic",
+                        old.source_type == "derived")
             self.log.append(d)
             if d.conflict:
                 decisions.append(d)
+        return decisions
+
+    def _check_domain(self, g: BJG, new_edge: Edge,
+                      skip: set[str]) -> list[Decision]:
+        affected = self.domain_deps.affects(new_edge.domain)
+        if not affected:
+            return []
+        # Same-session facts (equal t_transaction) are excluded from BOTH
+        # implicit paths: one session describes one consistent snapshot,
+        # and a coping plan stated alongside a schedule must not be read
+        # as invalidating it (observed: session 36's "floating sleep
+        # blocks" plan superseding that same session's overnight-job
+        # facts). Staleness is a cross-session phenomenon; same-slot
+        # same-session replacement stays the exact-slot path's job.
+        candidates = [e for e in g.find(subject=new_edge.subject)
+                      if e.id not in skip
+                      and e.relation != new_edge.relation
+                      and e.t_transaction != new_edge.t_transaction
+                      and e.domain in affected
+                      and windows_overlap(e, new_edge)]
+        if not candidates:
+            return []
+        # One representative per relation: the most recent active fact
+        # in a slot is the current state a new fact could invalidate;
+        # same-relation history adds prompt length, not coverage. The
+        # cap then keeps the OLDEST slots first - staleness lives in
+        # facts recorded long before the new one (a recency-first cap
+        # was observed evicting exactly the stale target this path
+        # exists to catch, while an age cap misses nothing that a
+        # 60-slot state summary would hold).
+        by_relation: dict[str, Edge] = {}
+        for e in candidates:
+            cur = by_relation.get(e.relation)
+            if cur is None or (e.t_transaction or "") > \
+                    (cur.t_transaction or ""):
+                by_relation[e.relation] = e
+        candidates = sorted(by_relation.values(),
+                            key=lambda e: e.t_transaction or "")
+        candidates = candidates[:self.domain_max_candidates]
+        decisions = []
+        for verdict in self.propose(new_edge, candidates):
+            old = candidates[verdict["index"]]
+            axis = verdict.get("axis")
+            # two-stage: the batched proposer is recall-oriented; each
+            # proposal is confirmed by the pairwise adjudicator before
+            # it supersedes anything (a handful of extra calls per
+            # session, and it filters the one-off-event-vs-routine
+            # over-triggering observed from the proposer alone)
+            if self.adjudicate is not None:
+                confirm = self.adjudicate(new_edge, old)
+                if not confirm.get("conflict"):
+                    continue
+                axis = confirm.get("axis") or axis
+            d = Decision(new_edge.id, old.id, True, axis,
+                         "domain", old.source_type == "derived")
+            self.log.append(d)
+            decisions.append(d)
         return decisions

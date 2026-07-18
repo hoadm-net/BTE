@@ -33,7 +33,8 @@ from ..memory import READER_SYSTEM  # noqa: E402
 
 class Mem0Memory:
     def __init__(self, reader: Callable[[str, str], str], k: int = 12,
-                 model: str = "gpt-4o-mini") -> None:
+                 model: str = "gpt-4o-mini",
+                 reader_system: str = READER_SYSTEM) -> None:
         store = tempfile.mkdtemp(prefix="mem0-")
         self._mem = Memory.from_config({
             "vector_store": {
@@ -46,6 +47,11 @@ class Mem0Memory:
         self._user = f"u-{uuid.uuid4().hex[:8]}"
         self.reader = reader
         self.k = k
+        # same per-benchmark reader configuration as BJGMemory: the
+        # fixed-reader protocol fixes the reader ACROSS systems within a
+        # benchmark, and each benchmark's runner supplies its protocol's
+        # prompt (STALE has no abstention clause, LongMemEval expects one)
+        self.reader_system = reader_system
 
     def ingest_session(self, turns: list[str], timestamp: str) -> None:
         for turn in turns:
@@ -62,5 +68,6 @@ class Mem0Memory:
         if not memories:
             return "unknown"
         rendered = "\n".join(f"- {m}" for m in memories)
-        user = f"Facts:\n{rendered}\n\nQuestion: {question}"
-        return self.reader(READER_SYSTEM, user).strip()
+        today = f"Current date: {reference_time}\n" if reference_time else ""
+        user = f"{today}Facts:\n{rendered}\n\nQuestion: {question}"
+        return self.reader(self.reader_system, user).strip()
