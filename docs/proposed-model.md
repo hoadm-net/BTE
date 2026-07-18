@@ -141,6 +141,7 @@ Evidence for Theorem 1's premise: no surveyed system maintains $\Sigma$ or compu
 | APEX-MEM | yes (append-only) | no | no (resolves per-query at retrieval time, not stored) |
 | Hindsight | yes (per-fact) | no (opinions get confidence reinforcement only) | no |
 | ChainEdit (knowledge editing, different substrate) | no (true/false only) | yes (static KB rules) | yes (batch, one axis) |
+| CUPMem (STALE's own baseline) | no (single active/stale tag) | no (LLM-judged candidate set, no graph) | yes (online, one axis, unproven) |
 | **This work** | yes | yes | yes (online, two axes, bounded — proven, formalism.md) |
 
 ## Open implementation questions

@@ -10,11 +10,28 @@ the new one — non-destructive. No justification/dependency structure between
 edges: invalidation is local to the edge directly contradicted.
 
 **Mem0** — [Chhikara et al., *Mem0: Building Production-Ready AI Agents with
-Scalable Long-Term Memory*, 2025](https://arxiv.org/abs/2504.19413).
-LLM-mediated `ADD`/`UPDATE`/`DELETE` decision per incoming fact based on
-similarity to existing memory. No explicit valid-time/transaction-time
-separation, no dependency graph — conflict handling is a per-fact
-classification, not a graph traversal.
+Scalable Long-Term Memory*, 2025](https://arxiv.org/abs/2504.19413). The
+paper describes an LLM-mediated `ADD`/`UPDATE`/`DELETE` decision per
+incoming fact based on similarity to existing memory. **Checked against the
+installed library (`mem0ai==2.0.11`, source read 2026-07-08): the current
+default `add()` path no longer matches this description.** The
+update/delete prompt and its call site
+(`get_update_memory_messages`/`DEFAULT_UPDATE_MEMORY_PROMPT`) are dead code
+— unreferenced anywhere in `mem0/memory/main.py`. The live path is a single
+`ADDITIVE_EXTRACTION_PROMPT` call: extract facts, embed, dedup by content
+hash, and store with `linked_memory_ids` pointing at related existing
+memories — no explicit supersession or deletion step. Two things worth
+noting for anyone citing Mem0's conflict handling from the paper alone: (1)
+the library has drifted toward ADD-only-plus-linking, i.e. closer to
+APEX-MEM's defer-to-query-time posture than the paper's ADD/UPDATE/DELETE
+description suggests; (2) an informal smoke test run against this library version, structured
+after [formalism.md](formalism.md) §5's Theorem 1 counterexample, observed
+this directly — Mem0 sometimes annotates a contradiction in a memory's own
+text ("this directly contradicts an earlier statement...") without
+resolving it, consistent with an ADD-only architecture rather than a bug.
+No explicit valid-time/transaction-time separation, no dependency graph —
+whatever conflict signal exists is prose inside a text field, not a graph
+traversal.
 
 **Engram** — [*Less Context, More Accuracy: A Bi-Temporal Memory Engine for LLM
 Agents*, 2026](https://arxiv.org/abs/2606.09900). Closest existing system to
@@ -52,6 +69,36 @@ Strong results (88.9% LoCoMo QA, 86.2% LongMemEval). A distinct resolution
 paradigm: instead of computing and storing a status per edge, it re-resolves
 from raw history on every query — avoids storing a wrong status, at the cost
 of redoing resolution work every query rather than amortizing it once.
+
+**CUPMem** — [*STALE: Can LLM Agents Know When Their Memories Are No Longer
+Valid?*, 2026](https://arxiv.org/abs/2605.06527), proposed alongside the
+STALE benchmark itself. The closest conceptual match to this project's
+propagation claim: write-side adjudication tags each memory
+`{KEEP, STALE, REPLACE, UNKNOWN}`, and "topology-triggered propagation"
+explicitly widens the invalidation search *beyond the directly-touched
+attribute* — the same phenomenon Theorem 1 targets. Read in full (checked
+2026-07-08) it turns out structurally close to the systems Theorem 1
+already covers, not a formal counterexample to it: the candidate set for
+propagation is $\mathcal{C}_t = \{i \in \mathcal{A}_{t-1} \mid z_i \in
+\text{Direct}(\Delta_t) \cup \text{Affected}_\theta(\Delta_t, \Omega)\}
+\cup \text{Global}_k(\Delta_t, \mathcal{A}_{t-1})$ — no graph or
+justification structure backs `Affected`/`Global_k`; the paper specifies
+adjudication and affected-region membership as LLM judgments with no
+stated criteria, not a computable relation over an explicit dependency
+graph. Memory state is a single active/stale tag per attribute — no
+valid-time/transaction-time split, so it has no way to distinguish
+*update* from *correction* the way `classify(e)` does here (formalism.md
+§9). No theorem, proof, or complexity bound is given for propagation
+correctness or termination. Reports a large empirical jump over an
+undescribed baseline (8.7% → 68.0%) — a useful calibration point for
+STALE's difficulty, not a comparable number without knowing their exact
+per-dimension scoring. Evaluation protocol worth reusing regardless of
+the architecture gap: STALE scores responses with an LLM judge assessing
+"awareness of the conflict and the updated user state" directly against
+the scenario's own old/new-state description, explicitly *not* against a
+synthetic reference string, with reported 95.8% human concordance — this
+project's own STALE harness should follow the same judge design for
+comparability.
 
 **TiMem** — [*TiMem: Temporal-Hierarchical Memory Consolidation for
 Long-Horizon Conversational Agents*, 2026](https://arxiv.org/abs/2601.02845).
