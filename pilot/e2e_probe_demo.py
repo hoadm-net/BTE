@@ -34,9 +34,10 @@ def main():
     for pid in PICKS:
         item = items[pid]
         d = DOMAIN_BY_NAME[item.domain]
+        vocab = list(d.relations) + list(d.conclusions)
         ing = Ingestor(
             extract=lambda text, ts, ctx: extract_facts(
-                extractor, text, ts, ctx),
+                extractor, text, ts, ctx, relation_vocab=vocab),
             detector=ConflictDetector(
                 adjudicate=make_llm_adjudicator(extractor)),
             rules=domain_rules(d),

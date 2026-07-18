@@ -81,6 +81,31 @@ def test_error_isolated_per_item():
     assert "network down" in rec.error
 
 
+def test_mid_sequence_failure_poisons_the_whole_record():
+    """The LongMemEval/mem0 bug in miniature: a failure on the LAST
+    session (the contradiction turn, the one the item is actually
+    testing) must not be silently absorbed into a clean-looking record.
+    Unlike bench.py's per-session isolation, probe_bench.py has no
+    per-session catch, so this must raise all the way up to error=."""
+    class FailsOnLastIngest(StubMemory):
+        def __init__(self):
+            super().__init__(ITEM.gold_pre, "should never be recorded")
+            self.calls = 0
+
+        def ingest_session(self, turns, timestamp):
+            self.calls += 1
+            if self.calls == len(ITEM.sessions):  # the contradiction turn
+                raise RuntimeError("provider hiccup on the critical turn")
+            super().ingest_session(turns, timestamp)
+
+    rec = run_probe_item(
+        lambda item: FailsOnLastIngest(), ITEM, ExactJudge(), "stub")
+    assert rec.error is not None
+    assert "provider hiccup" in rec.error
+    # must NOT look like a clean, resumable-as-done success
+    assert rec.post_answer == ""
+
+
 def test_run_probe_benchmark_writes_and_summarizes(tmp_path):
     out = tmp_path / "probe.jsonl"
     items = [i for i in generate() if i.hop_depth in (1, 3)][:4]

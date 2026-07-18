@@ -57,6 +57,21 @@ def test_latest_record_wins_on_reprocessing(tmp_path):
     assert already_done(str(out), "mem0") == {"q1"}
 
 
+def test_latest_failure_after_earlier_success_is_not_done(tmp_path):
+    """An item succeeded under an older prompt/schema, then failed on
+    the latest attempt after a code change - naive 'ever succeeded'
+    resume would serve the stale pre-change success forever and never
+    retry the now-broken latest attempt."""
+    out = tmp_path / "r.jsonl"
+    write(out, [
+        {"system": "mem0", "question_id": "q1", "error": None,
+         "ingest_errors": 0},
+        {"system": "mem0", "question_id": "q1",
+         "error": "JSONDecodeError: boom", "ingest_errors": 0},
+    ])
+    assert already_done(str(out), "mem0") == set()
+
+
 def test_scoped_per_system(tmp_path):
     out = tmp_path / "r.jsonl"
     write(out, [{"system": "bjg", "question_id": "q1", "error": None,

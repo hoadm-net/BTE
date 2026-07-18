@@ -26,12 +26,30 @@ OUT = ".plan/results/runs/probe_v0.jsonl"
 DOMAIN_BY_NAME = {d.name: d for d in DOMAINS}
 
 
-def bjg_factory(extractor: CachedLLM, reader: CachedLLM):
+def bjg_factory(extractor_kwargs: dict, reader: CachedLLM):
     def make(item):
         d = DOMAIN_BY_NAME[item.domain]
+        # Fresh extractor client per item, not one shared across the
+        # whole run: a long-lived client's pooled HTTP connection
+        # appears to go bad after enough requests (observed: the same
+        # ~30 items failed identically, deterministically, on every
+        # rerun through a shared client - including fully sequential
+        # reruns with no concurrency at all - yet every one of them
+        # succeeds immediately in isolation with a fresh client). The
+        # disk cache is keyed on request content, not on the client
+        # instance, so this costs nothing on cache hits.
+        extractor = CachedLLM(**extractor_kwargs)
+        # The probe's domain schema is known in advance, so relation
+        # names can be structurally constrained (extraction.py's
+        # relation_vocab / EDC-style target alignment) rather than
+        # relying on the model to freely reproduce the exact string —
+        # this is what makes derive_closure()'s exact-match ChainRule
+        # lookups reliable. Open-domain data (LongMemEval etc.) has no
+        # such fixed vocabulary and doesn't get this treatment.
+        vocab = list(d.relations) + list(d.conclusions)
         ing = Ingestor(
             extract=lambda text, ts, ctx: extract_facts(
-                extractor, text, ts, ctx),
+                extractor, text, ts, ctx, relation_vocab=vocab),
             detector=ConflictDetector(
                 adjudicate=make_llm_adjudicator(extractor)),
             rules=domain_rules(d),
@@ -50,18 +68,22 @@ def mem0_factory(reader: CachedLLM):
 
 
 def already_done(out_path: str, system: str) -> set[str]:
-    """probe_ids with a successful record for this system already - see
-    run_longmemeval.py's version for why this matters for baselines
-    without their own call cache."""
+    """probe_ids whose MOST RECENT record for this system succeeded.
+    Must be latest-wins, not "ever succeeded": a probe_id can have an
+    old successful record from before a code/prompt change and a newer
+    failing one from after it (observed: an enum-constrained extraction
+    run failed on 33 items that had succeeded in earlier runs before the
+    fix landed - "ever succeeded" resume treated them as done and never
+    retried the failing latest attempt, silently keeping stale results)."""
     if not os.path.exists(out_path):
         return set()
-    done = set()
+    latest: dict[str, dict] = {}
     with open(out_path) as f:
         for line in f:
             r = json.loads(line)
-            if r["system"] == system and not r.get("error"):
-                done.add(r["probe_id"])
-    return done
+            if r["system"] == system:
+                latest[r["probe_id"]] = r
+    return {pid for pid, r in latest.items() if not r.get("error")}
 
 
 def main():
@@ -91,17 +113,17 @@ def main():
             print("nothing left to run")
             return
 
-    extractor = CachedLLM(model="deepseek/deepseek-v3.2",
-                          base_url="https://openrouter.ai/api/v1",
-                          api_key_env="OPENROUTER_API_KEY",
-                          extra={"max_tokens": 4000})
+    extractor_kwargs = dict(model="deepseek/deepseek-v3.2",
+                            base_url="https://openrouter.ai/api/v1",
+                            api_key_env="OPENROUTER_API_KEY",
+                            extra={"max_tokens": 4000})
     reader = CachedLLM(model="qwen/qwen3.5-9b",
                        base_url="https://openrouter.ai/api/v1",
                        api_key_env="OPENROUTER_API_KEY")
     judge = ProbeJudge(CachedLLM(model="gpt-5", temperature=None))
 
     factory = mem0_factory(reader) if args.system == "mem0" \
-        else bjg_factory(extractor, reader)
+        else bjg_factory(extractor_kwargs, reader)
 
     os.makedirs(".plan/results/runs", exist_ok=True)
     records = run_probe_benchmark(

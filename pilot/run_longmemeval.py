@@ -46,13 +46,22 @@ def mem0_factory(reader: CachedLLM):
 
 def already_done(out_path: str, system: str,
                  max_ingest_errors: int = 3) -> set[str]:
-    """question_ids with a genuinely usable record for this system.
-    Baselines with no call-level cache of their own (Mem0's internal
-    extraction is not routed through CachedLLM) redo real, billed work
-    on every rerun otherwise - a crash partway through a 100-question run
-    should not mean re-paying for the ones that already succeeded.
+    """question_ids whose MOST RECENT record for this system is a
+    genuinely usable success. Baselines with no call-level cache of
+    their own (Mem0's internal extraction is not routed through
+    CachedLLM) redo real, billed work on every rerun otherwise - a crash
+    partway through a 100-question run should not mean re-paying for the
+    ones that already succeeded.
 
-    error=None alone is not enough: a session-level failure inside
+    Must be latest-wins, not "ever succeeded": a question_id can have an
+    old successful record from before a code/prompt change and a newer
+    failing one from after it. "Ever succeeded" resume would treat it as
+    done and never retry the failing latest attempt, silently keeping
+    stale results (observed with the probe harness: an enum-constrained
+    extraction change made 33 previously-clean items fail, and naive
+    resume kept serving their pre-change successes forever).
+
+    error=None alone is also not enough: a session-level failure inside
     ingest_session is caught per-session (bench.py), so a question can
     finish with no top-level error while most of its sessions were
     silently dropped (observed: an OpenRouter outage mid-run left ~30
@@ -62,14 +71,15 @@ def already_done(out_path: str, system: str,
     """
     if not os.path.exists(out_path):
         return set()
-    done = set()
+    latest: dict[str, dict] = {}
     with open(out_path) as f:
         for line in f:
             r = json.loads(line)
-            if (r["system"] == system and not r.get("error")
-                    and r.get("ingest_errors", 0) <= max_ingest_errors):
-                done.add(r["question_id"])
-    return done
+            if r["system"] == system:
+                latest[r["question_id"]] = r
+    return {qid for qid, r in latest.items()
+            if not r.get("error")
+            and r.get("ingest_errors", 0) <= max_ingest_errors}
 
 
 def main():
