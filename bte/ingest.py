@@ -10,6 +10,7 @@ stays in the graph (append-only) and BBP restores JTS downstream.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -18,6 +19,12 @@ from .conflict import CORRECTION, ConflictDetector, Decision
 from .graph import BJG, Edge
 from .lattice import S, Sigma
 from .rules import ChainRule, derive_closure
+
+
+def _loose_key(s: str) -> str:
+    """Lowercase with all non-alphanumeric characters stripped, so
+    'CasCorp', 'cas_corp', and 'Cas Corp' compare equal."""
+    return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
 @dataclass
@@ -82,10 +89,20 @@ class Ingestor:
                 ))
 
     def _retraction_targets(self, r: dict) -> list[Edge]:
+        # Match objects up to case/spacing/casing-convention only (e.g.
+        # "CasCorp" vs "cas_corp"): the model is told to copy the known
+        # triple's object exactly but sometimes reformats it, and an
+        # exact-string match failing here means the "already handled"
+        # check below silently misses, falling through to the lone-
+        # occupant heuristic and retargeting the retraction onto whatever
+        # NEW edge happens to occupy the slot (observed: a same-turn
+        # replacement fact + a now-redundant retraction of the old value
+        # raced, and the retraction ended up superseding the replacement
+        # instead of being recognized as already-satisfied).
+        target_key = _loose_key(r["object"])
         candidates = self.graph.find(subject=r["subject"],
                                      relation=r["relation"])
-        exact = [e for e in candidates
-                 if e.object.lower() == r["object"].lower()]
+        exact = [e for e in candidates if _loose_key(e.object) == target_key]
         if exact:
             return exact
         # object matches an edge already superseded (e.g. by a replacement
@@ -94,7 +111,7 @@ class Ingestor:
         everything = self.graph.find(subject=r["subject"],
                                      relation=r["relation"],
                                      active_only=False)
-        if any(e.object.lower() == r["object"].lower() for e in everything):
+        if any(_loose_key(e.object) == target_key for e in everything):
             return []
         # a lone slot occupant is unambiguous even if the object spelling
         # drifted between the known-facts rendering and the model's copy
@@ -139,6 +156,7 @@ class Ingestor:
             t_valid_end=f.get("valid_to"),
             t_transaction=t_transaction,
             confidence=f.get("confidence", 1.0),
+            domain=f.get("domain"),
         )
         premise_ids = [pid for p in f.get("premises", ())
                        if (pid := self._find_premise(p)) is not None]

@@ -141,6 +141,28 @@ def test_redundant_retraction_spares_replacement():
     assert [e.object for e in active] == ["Apex"]
 
 
+def test_redundant_retraction_survives_object_casing_drift():
+    """Reproduces a real extraction pattern (probe item
+    res-d4-der-corr-adj-hi-r1): a correction turn produces BOTH a
+    replacement fact (is_correction=true) AND a redundant retraction of
+    the old value, and the model reformats the retraction's object
+    casing ('cas_corp') instead of copying the stored form ('CasCorp')
+    exactly. The replacement fact alone already supersedes the old edge;
+    the retraction must recognize that and no-op, not fall through to
+    the lone-active-occupant heuristic and supersede the replacement."""
+    ing = Ingestor()
+    ing.ingest_facts([fact("gridpay", "owned_by", "CasCorp")], "t1")
+    report = ing.ingest_facts(
+        [fact("gridpay", "owned_by", "bluepeak_group", correction=True)],
+        "t2")
+    ing.apply_retractions([{
+        "subject": "gridpay", "relation": "owned_by",
+        "object": "cas_corp", "was_wrong": True,
+    }], report)
+    active = ing.graph.find(subject="gridpay", relation="owned_by")
+    assert [e.object for e in active] == ["bluepeak_group"]
+
+
 def test_decisions_are_logged_for_h5():
     det = ConflictDetector()
     ing = Ingestor(detector=det)

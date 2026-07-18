@@ -6,65 +6,121 @@ consequences enter the graph as derived edges), and retractions — known
 facts the message declares ended or wrong. Keeping retractions out of the
 facts list is deliberate: an earlier single-list design made the model
 mark replacement facts as retractions and lose them.
+
+Relation-name canonicalization (optional `relation_vocab`): this is the
+same problem as surface-form variation in Open Information Extraction —
+the same relation coming out as "power_utility_of" in one call and
+"electric_utility_is" in another, which silently breaks ChainRule
+matching in rules.py (derive_closure requires exact relation equality, so
+a justification edge that should exist just never gets built — a
+structural gap, not a BBP failure; BBP is proven correct over whatever
+graph it is handed, see formalism.md Theorem 2). When the caller knows the
+target relation vocabulary in advance (the diagnostic probe's domains have
+one), this is the schema-guided case of Extract-Define-Canonicalize's
+"Target Alignment" (Zhang et al., EMNLP 2024,
+https://arxiv.org/abs/2404.03868) — EDC does target alignment as a
+post-hoc cosine-similarity + LLM-verification pass; here it is done
+structurally instead, via a JSON-schema `enum` constraint on the relation
+field, which is a strictly stronger guarantee (the model cannot emit an
+off-vocabulary relation at all, not just "is discouraged from it").
+Open-domain data with no fixed target schema (LongMemEval, STALE) doesn't
+have this option — canonicalizing that is a separate, harder problem
+(Zep/Graphiti's entropy-gated fuzzy entity/edge matching is the relevant
+precedent; not implemented here, tracked as follow-up work).
 """
 
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 from .llm import CachedLLM
 
-_TRIPLE_PROPS = {
-    "subject": {"type": "string"},
-    "relation": {"type": "string"},
-    "object": {"type": "string"},
-}
+# Coarse life-domain types for extracted facts. This is the top level of a
+# two-level (domain, relation) typing: the relation plays the fine-grained
+# slot role, the domain gates cross-relation conflict candidate generation
+# (see conflict.DomainDependencies). Written as a generic everyday-life
+# ontology, independent of any benchmark's generation ontology; CUPMem
+# (STALE, arXiv 2605.06527, Appendix F) uses the same two-level shape but
+# with a fixed hand-authored slot layer and no online learning.
+DOMAINS = [
+    "health",
+    "work_or_study",
+    "schedule_and_routine",
+    "location_and_residence",
+    "transport_and_commute",
+    "family_and_social",
+    "finance_and_resources",
+    "possessions_and_devices",
+    "preferences_and_habits",
+    "plans_and_goals",
+    "other",
+]
 
-EXTRACTION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "facts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    **_TRIPLE_PROPS,
-                    "valid_from": {"type": ["string", "null"]},
-                    "valid_to": {"type": ["string", "null"]},
-                    "confidence": {"type": "number"},
-                    "is_correction": {"type": "boolean"},
-                    "premises": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": _TRIPLE_PROPS,
-                            "required": ["subject", "relation", "object"],
-                            "additionalProperties": False,
+
+def _triple_props(relation_vocab: Optional[list[str]] = None) -> dict:
+    relation_schema: dict = {"type": "string"}
+    if relation_vocab:
+        relation_schema = {"type": "string", "enum": list(relation_vocab)}
+    return {
+        "subject": {"type": "string"},
+        "relation": relation_schema,
+        "object": {"type": "string"},
+    }
+
+
+def _build_schema(relation_vocab: Optional[list[str]] = None) -> dict:
+    triple_props = _triple_props(relation_vocab)
+    return {
+        "type": "object",
+        "properties": {
+            "facts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        **triple_props,
+                        "domain": {"type": "string", "enum": DOMAINS},
+                        "valid_from": {"type": ["string", "null"]},
+                        "valid_to": {"type": ["string", "null"]},
+                        "confidence": {"type": "number"},
+                        "is_correction": {"type": "boolean"},
+                        "premises": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": triple_props,
+                                "required": ["subject", "relation", "object"],
+                                "additionalProperties": False,
+                            },
                         },
                     },
+                    "required": ["subject", "relation", "object", "domain",
+                                 "valid_from", "valid_to", "confidence",
+                                 "is_correction", "premises"],
+                    "additionalProperties": False,
                 },
-                "required": ["subject", "relation", "object", "valid_from",
-                             "valid_to", "confidence", "is_correction",
-                             "premises"],
-                "additionalProperties": False,
+            },
+            "retractions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        **triple_props,
+                        "was_wrong": {"type": "boolean"},
+                    },
+                    "required": ["subject", "relation", "object",
+                                 "was_wrong"],
+                    "additionalProperties": False,
+                },
             },
         },
-        "retractions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    **_TRIPLE_PROPS,
-                    "was_wrong": {"type": "boolean"},
-                },
-                "required": ["subject", "relation", "object", "was_wrong"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["facts", "retractions"],
-    "additionalProperties": False,
-}
+        "required": ["facts", "retractions"],
+        "additionalProperties": False,
+    }
+
+
+EXTRACTION_SCHEMA = _build_schema()
 
 SYSTEM_PROMPT = """Extract durable user facts from the message, and identify which known facts the message retracts.
 
@@ -75,6 +131,18 @@ Output two lists:
    - relation: short snake_case predicate. Reuse the relation names and
      entity spellings of the known facts whenever the new fact concerns
      the same kind of thing.
+   - object: a concrete, self-contained value describing the actual state.
+     NEVER a bare "true"/"false" and NEVER a repeat of the relation name
+     (e.g. relation "observes_dst" with object "observes_dst" is wrong).
+     For yes/no or on/off facts, phrase the object as the state itself in
+     a few words: relation "observes_dst", object "observes daylight
+     saving time" when true, object "stays on standard time, no daylight
+     saving" when false. A reader must be able to understand the object
+     without negating the relation name.
+   - domain: the life area the fact belongs to, from the fixed list in
+     the schema. Pick the area the fact is ABOUT (a job's hours are
+     work_or_study; a habit of limiting commitments for health reasons
+     is health). Use "other" only when nothing fits.
    - valid_from/valid_to: ISO dates if stated, else null.
    - confidence: 1.0 for direct statements, lower for hedged ones.
    - is_correction: true only if the speaker says an earlier statement
@@ -90,6 +158,12 @@ Output two lists:
    - was_wrong: true if the fact was wrong from the start (correction),
      false if the world changed (the fact ended).
    - Only list facts that appear in the known facts list. Empty if none."""
+
+RELATION_VOCAB_NOTE = """
+Every "relation" field (in facts, premises, and retractions) MUST be
+chosen from this fixed list — pick whichever one the sentence actually
+expresses, do not invent a new name even if it seems more natural:
+{relations}"""
 
 
 def normalize(term: str) -> str:
@@ -114,21 +188,30 @@ def _norm_triple(t) -> dict | None:
 
 
 def extract_facts(llm: CachedLLM, text: str, reference_date: str,
-                  context: list[str] | None = None) -> dict:
+                  context: list[str] | None = None,
+                  relation_vocab: list[str] | None = None) -> dict:
     known = ""
     if context:
         known = "Known active facts:\n" + "\n".join(
             f"- {c}" for c in context) + "\n"
+    system = SYSTEM_PROMPT
+    schema = EXTRACTION_SCHEMA
+    if relation_vocab:
+        system = SYSTEM_PROMPT + RELATION_VOCAB_NOTE.format(
+            relations=", ".join(relation_vocab))
+        schema = _build_schema(relation_vocab)
     data = llm.complete_json(
-        SYSTEM_PROMPT,
+        system,
         f"Reference date: {reference_date}\n{known}Message: {text}",
         "extraction",
-        EXTRACTION_SCHEMA,
+        schema,
     )
     facts = []
     for f in data.get("facts") or []:
         if _norm_triple(f) is None:
             continue
+        if f.get("domain") not in DOMAINS:
+            f["domain"] = "other"
         f["premises"] = [p for p in (f.get("premises") or [])
                          if _norm_triple(p) is not None]
         facts.append(f)
