@@ -12,6 +12,7 @@ import os
 import random
 
 from bte.bench import Judge, load_longmemeval, run_benchmark, summarize
+from bte.canonical import RelationCanonicalizer, make_llm_relation_verifier
 from bte.conflict import ConflictDetector, make_llm_adjudicator
 from bte.extraction import extract_facts
 from bte.ingest import Ingestor
@@ -24,14 +25,29 @@ OUT = ".plan/results/runs/longmemeval_s.jsonl"
 
 
 def bjg_factory(extractor: CachedLLM, reader: CachedLLM):
+    # Relation canonicalization only - not the domain-typed conflict
+    # path (Track C). A smoke test on real LongMemEval haystacks (39
+    # sessions, denser real-conversation content than STALE's templated
+    # scenarios) showed the per-fact proposer cost growing far faster
+    # here than on STALE, driving per-question ingest well past an hour
+    # and, on two items, an empty reader response (silently truncated
+    # by too large an accumulated context - complete_text's `content or
+    # ""` swallows that instead of raising). Canonicalization alone
+    # already benefits open-domain relation matching at a fraction of
+    # the cost; the domain path stays STALE-specific until there's a
+    # reason to believe LongMemEval's KU/TR categories need it.
     def make():
+        embedder = CachedEmbedder()
         ing = Ingestor(
             extract=lambda text, ts, ctx: extract_facts(
                 extractor, text, ts, ctx),
             detector=ConflictDetector(
                 adjudicate=make_llm_adjudicator(extractor)),
+            canonicalizer=RelationCanonicalizer(
+                embedder=embedder,
+                verify=make_llm_relation_verifier(extractor)),
         )
-        return BJGMemory(ing, Retriever(ing.graph, CachedEmbedder()),
+        return BJGMemory(ing, Retriever(ing.graph, embedder),
                          reader=reader.complete_text)
     return make
 
