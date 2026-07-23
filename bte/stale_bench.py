@@ -38,7 +38,14 @@ STALE_READER_SYSTEM = (
     "it. A fact may carry change history in parentheses: '(previously: "
     "X, recorded DATE)' means its value was X before being updated. "
     "When facts disagree, the more recently recorded one reflects the "
-    "user's current situation."
+    "user's current situation. A line starting with 'INVALIDATED:' is "
+    "NOT a current fact - it is a conclusion that used to hold but no "
+    "longer does; do not state it or rely on it, and if nothing else "
+    "establishes the current value, treat the matter as unresolved. This "
+    "also applies indirectly: a fact about some OTHER entity can remain "
+    "true on its own even after an INVALIDATED line shows the fact "
+    "connecting you to that entity no longer holds - in that case the "
+    "other entity's fact no longer describes your current situation."
 )
 
 STALE_JUDGE_SCHEMA = {

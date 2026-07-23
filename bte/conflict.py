@@ -27,11 +27,13 @@ graph) is deliberately deferred: measure what single-hop retrieval
 closes on STALE T2 before adding that complexity.
 
 Embedding similarity, however, cannot see conflicts whose only link is
-commonsense (measured on STALE T2: the target pair "overnight hotel
-job" vs "limits commitments to manage symptoms" sits at cosine
-0.20-0.32 while genuinely-caught pairs cluster at 0.54+; MemStrata,
-arXiv 2606.26511, independently reports AUROC 0.59 — near chance — for
-cosine on contradiction-vs-duplicate). The domain path fixes this the
+commonsense: a cosine-based candidate search reliably surfaces conflicts
+that share vocabulary, but conflicts connected purely through
+real-world implication (no fact restates the connecting concept) sit
+far below any threshold that would also catch the lexical ones without
+swamping the adjudicator with noise — MemStrata, arXiv 2606.26511,
+independently reports AUROC 0.59 (near chance) for cosine on
+contradiction-vs-duplicate. The domain path fixes this the
 way working 2026 systems converge on: represent dependency structurally
 at the TYPE level, not discover it pairwise at the instance level.
 Facts carry a coarse life-domain type (extraction.DOMAINS); a small
@@ -51,6 +53,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from .domains import DomainDependencies
 from .graph import BJG, Edge
 from .llm import CachedLLM
 from .retrieval import Embedder, cosine, edge_text
@@ -68,65 +71,6 @@ ADJUDICATION_SCHEMA = {
     "required": ["conflict", "axis", "reason"],
     "additionalProperties": False,
 }
-
-# Directed commonsense prior: a new fact in the KEY domain may implicitly
-# invalidate older facts in the VALUE domains. Authored as generic
-# everyday-life knowledge before any benchmark run; the learned layer in
-# DomainDependencies extends it online from confirmed conflicts.
-DOMAIN_DEPENDENCY_PRIOR: dict[str, frozenset[str]] = {
-    "work_or_study": frozenset({
-        "health", "schedule_and_routine", "finance_and_resources",
-        "location_and_residence", "transport_and_commute", "plans_and_goals"}),
-    "location_and_residence": frozenset({
-        "transport_and_commute", "schedule_and_routine", "work_or_study",
-        "preferences_and_habits", "plans_and_goals"}),
-    "health": frozenset({
-        "schedule_and_routine", "transport_and_commute", "work_or_study",
-        "preferences_and_habits", "plans_and_goals"}),
-    "family_and_social": frozenset({
-        "schedule_and_routine", "location_and_residence",
-        "finance_and_resources", "plans_and_goals"}),
-    "finance_and_resources": frozenset({
-        "plans_and_goals", "possessions_and_devices", "preferences_and_habits"}),
-    "schedule_and_routine": frozenset({"health", "plans_and_goals"}),
-    "transport_and_commute": frozenset({"schedule_and_routine", "plans_and_goals"}),
-    "possessions_and_devices": frozenset({
-        "preferences_and_habits", "schedule_and_routine"}),
-    "plans_and_goals": frozenset({"schedule_and_routine", "finance_and_resources"}),
-    "preferences_and_habits": frozenset({"plans_and_goals"}),
-}
-
-
-@dataclass
-class DomainDependencies:
-    """Domain-level dependency structure gating implicit-conflict search:
-    a static commonsense prior plus edges learned online from confirmed
-    cross-domain conflicts (the conflict-side dual of the detector's
-    learned_multivalued non-conflict pruning). The learned counts are an
-    inspectable artifact: which dependencies the data actually exercised.
-    """
-
-    prior: dict[str, frozenset[str]] = field(
-        default_factory=lambda: dict(DOMAIN_DEPENDENCY_PRIOR))
-    learned: dict[tuple[str, str], int] = field(default_factory=dict)
-    learn_after: int = 1
-
-    def affects(self, domain: Optional[str]) -> frozenset[str]:
-        if not domain:
-            return frozenset()
-        out = set(self.prior.get(domain, frozenset()))
-        for (a, b), n in self.learned.items():
-            if a == domain and n >= self.learn_after:
-                out.add(b)
-        return frozenset(out)
-
-    def record(self, new_domain: Optional[str],
-               old_domain: Optional[str]) -> None:
-        if not new_domain or not old_domain or new_domain == old_domain:
-            return
-        key = (new_domain, old_domain)
-        self.learned[key] = self.learned.get(key, 0) + 1
-
 
 PROPOSAL_SCHEMA = {
     "type": "object",
@@ -182,13 +126,21 @@ OLD: {old}
 NEW: {new}
 
 Decide:
-- conflict: can both be simultaneously true? Consider both direct
-  contradiction (same relation, incompatible objects) and implicit
-  contradiction (the NEW fact's real-world implications rule out the
-  OLD fact, e.g. a detail that only makes sense in a different climate,
-  job, or life situation than the OLD fact describes). If they are
-  compatible (e.g. multi-valued relation, or unrelated topics), no
-  conflict.
+- conflict: can both be simultaneously true? Reason in two steps.
+  First, what situation does the NEW fact imply about the subject's
+  life - their schedule, location, possessions, obligations, habits?
+  Second, is the OLD fact still possible or plausible in that
+  situation? It IS a conflict when keeping the OLD fact as
+  currently-true would be impossible or clearly implausible given that
+  situation, even if the two facts mention entirely different topics:
+  selling a car voids its insurance arrangement; switching a driver's
+  license to a new address means the subject left the old city; a
+  fully-stacked overnight schedule means an earlier practice of
+  keeping days lightly committed is no longer being maintained. "They
+  describe different aspects of life" is NOT a reason for
+  compatibility - different aspects of one life constrain each other.
+  If both facts genuinely can hold at once (multi-valued relation,
+  independent activities), no conflict.
 - axis: if conflict, was the OLD fact wrong from the start (correction),
   or did the world change (update)? null if no conflict."""
 
@@ -272,6 +224,11 @@ class ConflictDetector:
     domain_deps: Optional[DomainDependencies] = None
     propose: Optional[Callable[[Edge, list[Edge]], list[dict]]] = None
     domain_max_candidates: int = 60
+    # proposer recall degrades on a long single-shot list - a candidate
+    # near the end of a full-length list can go unproposed even though
+    # the same pair confirms positively when adjudicated in isolation -
+    # so chunk the list, keeping any single call's attention span short
+    domain_chunk_size: int = 20
 
     def check(self, g: BJG, new_edge: Edge,
               is_correction: bool = False) -> list[Decision]:
@@ -388,10 +345,14 @@ class ConflictDetector:
         candidates = sorted(by_relation.values(),
                             key=lambda e: e.t_transaction or "")
         candidates = candidates[:self.domain_max_candidates]
+        proposals: list[tuple[Edge, str]] = []
+        for start in range(0, len(candidates), self.domain_chunk_size):
+            chunk = candidates[start:start + self.domain_chunk_size]
+            for verdict in self.propose(new_edge, chunk):
+                proposals.append((chunk[verdict["index"]],
+                                  verdict.get("axis")))
         decisions = []
-        for verdict in self.propose(new_edge, candidates):
-            old = candidates[verdict["index"]]
-            axis = verdict.get("axis")
+        for old, axis in proposals:
             # two-stage: the batched proposer is recall-oriented; each
             # proposal is confirmed by the pairwise adjudicator before
             # it supersedes anything (a handful of extra calls per

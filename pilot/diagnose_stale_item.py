@@ -10,8 +10,11 @@ import json
 import sys
 
 from bte.bench import render_session
-from bte.conflict import (ConflictDetector, DomainDependencies,
-                          make_llm_adjudicator, make_llm_proposer)
+from bte.canonical import (RelationCanonicalizer,
+                           make_llm_relation_verifier)
+from bte.conflict import (ConflictDetector, make_llm_adjudicator,
+                          make_llm_proposer)
+from bte.domains import DomainDependencies
 from bte.extraction import extract_facts
 from bte.ingest import Ingestor
 from bte.llm import CachedLLM
@@ -41,13 +44,17 @@ def main():
                        base_url="https://openrouter.ai/api/v1",
                        api_key_env="OPENROUTER_API_KEY")
     embedder = CachedEmbedder()
+    deps = DomainDependencies()
     ing = Ingestor(
         extract=lambda text, ts, ctx: extract_facts(extractor, text, ts, ctx),
         detector=ConflictDetector(adjudicate=make_llm_adjudicator(extractor),
-                                  domain_deps=DomainDependencies(),
+                                  domain_deps=deps,
                                   propose=make_llm_proposer(extractor)),
+        canonicalizer=RelationCanonicalizer(
+            embedder=embedder,
+            verify=make_llm_relation_verifier(extractor)),
     )
-    mem = BJGMemory(ing, Retriever(ing.graph, embedder),
+    mem = BJGMemory(ing, Retriever(ing.graph, embedder, domain_deps=deps),
                     reader=reader.complete_text,
                     reader_system=STALE_READER_SYSTEM)
 
@@ -85,6 +92,11 @@ def main():
                       f"[{new_e.domain}] vs "
                       f"({old_e.subject},{old_e.relation},{old_e.object}) "
                       f"[{old_e.domain}]")
+
+    if ing.canonicalizer is not None and ing.canonicalizer.log:
+        print(f"\nrelation merges: {len(ing.canonicalizer.log)}")
+        for subj, orig, canon, via in ing.canonicalizer.log:
+            print(f"    [{via}] {subj}: {orig} -> {canon}")
 
     deps = ing.detector.domain_deps
     if deps is not None and deps.learned:

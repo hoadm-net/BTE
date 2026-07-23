@@ -6,8 +6,8 @@ call per new fact instead of per-pair adjudication. All LLM-free: fake
 proposers with hand-scripted verdicts.
 """
 
-from bte.conflict import (DOMAIN_DEPENDENCY_PRIOR, ConflictDetector,
-                          DomainDependencies)
+from bte.conflict import ConflictDetector
+from bte.domains import DOMAIN_DEPENDENCY_PRIOR, DomainDependencies
 from bte.ingest import Ingestor
 from bte.lattice import S
 
@@ -150,6 +150,7 @@ def test_max_candidates_caps_and_prefers_oldest():
     for i in range(4):
         ing.ingest_facts([fact("user", f"habit{i}", f"habit number {i}",
                                domain="health")], f"t{i}")
+    proposer.calls.clear()  # count only the work fact's own call
     ing.ingest_facts([fact("user", "job", "overnight concierge",
                            domain="work_or_study")], "t9")
     assert len(proposer.calls) == 1
@@ -215,6 +216,105 @@ def test_pair_already_adjudicated_by_semantic_path_not_reproposed():
     # conflict); the domain path must not offer it to the proposer again
     for _, candidates in proposer.calls:
         assert all(c.object != "limits commitments" for c in candidates)
+
+
+def test_long_candidate_list_split_into_chunks():
+    """Proposer recall degrades on a long single-shot list. A target
+    near the END of a >chunk_size list must still reach the proposer,
+    in its own chunk."""
+    proposer = ScriptedProposer(
+        [{"object": "target value", "axis": "update"}])
+    det = ConflictDetector(domain_deps=DomainDependencies(),
+                           propose=proposer, domain_max_candidates=25,
+                           domain_chunk_size=10)
+    ing = Ingestor(detector=det)
+    for i in range(24):
+        ing.ingest_facts([fact("user", f"filler{i}", f"filler value {i}",
+                               domain="health")], f"t{i:02d}")
+    ing.ingest_facts([fact("user", "target_rel", "target value",
+                           domain="health")], "t24")
+    proposer.calls.clear()
+    ing.ingest_facts([fact("user", "job", "overnight concierge",
+                           domain="work_or_study")], "t99")
+    # 25 candidates / chunk_size 10 -> 3 calls, none exceeding chunk_size
+    assert len(proposer.calls) == 3
+    assert all(len(cands) <= 10 for _, cands in proposer.calls)
+    total_offered = sum(len(cands) for _, cands in proposer.calls)
+    assert total_offered == 25
+    # the target (chronologically last of the 25, so in the final chunk)
+    # was actually handed to the proposer, and got confirmed
+    old = ing.graph.find(subject="user", relation="target_rel",
+                         active_only=False)[0]
+    assert not ing.graph.is_active(old.id)
+
+
+def test_chunk_indices_remap_to_original_candidate():
+    """A proposal's index is chunk-local; the detector must map it back
+    to the right candidate, not the wrong one from a different chunk."""
+    def confirm_only_target(new, old):
+        return {"conflict": old.object == "target value", "axis": "update",
+                "reason": "x"}
+
+    class AllIndicesProposer:
+        def __call__(self, new, candidates):
+            return [{"index": i, "axis": "update", "reason": "x"}
+                    for i in range(len(candidates))]
+
+    det = ConflictDetector(adjudicate=confirm_only_target,
+                           domain_deps=DomainDependencies(),
+                           propose=AllIndicesProposer(),
+                           domain_max_candidates=15, domain_chunk_size=5)
+    ing = Ingestor(detector=det)
+    for i in range(14):
+        obj = "target value" if i == 3 else f"filler value {i}"
+        ing.ingest_facts([fact("user", f"rel{i}", obj,
+                               domain="health")], f"t{i:02d}")
+    ing.ingest_facts([fact("user", "job", "overnight concierge",
+                           domain="work_or_study")], "t99")
+    survivors = {e.relation: e for e in ing.graph.find(subject="user")
+                if e.domain == "health"}
+    assert "rel3" not in survivors  # exactly the target was superseded
+    assert len(survivors) == 13
+
+
+def test_same_domain_cross_relation_candidates_qualify():
+    """Self-loop: implicit conflicts inside one domain across different
+    relations have no other detection path (gold-pair audit: investing
+    preference vs options-trading habit, both finance)."""
+    proposer = ScriptedProposer(
+        [{"object": "prefers steady growth, never gambles", "axis": "update"}])
+    det = ConflictDetector(domain_deps=DomainDependencies(),
+                           propose=proposer)
+    ing = Ingestor(detector=det)
+    ing.ingest_facts([fact("user", "investing_preference",
+                           "prefers steady growth, never gambles",
+                           domain="finance_and_resources")], "t1")
+    old = ing.graph.find(subject="user")[0]
+    ing.ingest_facts([fact("user", "trading_habit",
+                           "learning options trading in the evenings",
+                           domain="finance_and_resources")], "t2")
+    assert not ing.graph.is_active(old.id)
+
+
+def test_other_domain_is_wildcard_in_both_roles():
+    """Untyped facts were invisible to the gate in either role (gold-
+    pair audit: a DMV errand implying a car sale; an [other]-typed
+    backup habit voided by a machine wipe)."""
+    proposer = ScriptedProposer()
+    det = ConflictDetector(domain_deps=DomainDependencies(),
+                           propose=proposer)
+    ing = Ingestor(detector=det)
+    ing.ingest_facts([fact("user", "car_ownership", "owns a hatchback",
+                           domain="possessions_and_devices")], "t1")
+    ing.ingest_facts([fact("user", "backup_habit", "keeps license keys",
+                           domain="other")], "t2")
+    # new "other" fact saw the possessions candidate
+    assert [c.object for c in proposer.calls[-1][1]] == ["owns a hatchback"]
+    ing.ingest_facts([fact("user", "computer_wipe", "wiped the machine",
+                           domain="possessions_and_devices")], "t3")
+    # old "other" fact qualified as candidate for a typed new fact
+    offered = [c.object for c in proposer.calls[-1][1]]
+    assert "keeps license keys" in offered
 
 
 def test_same_session_facts_not_offered_to_proposer():

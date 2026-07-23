@@ -64,13 +64,35 @@ def test_temporal_validity_filter():
     assert "old-city" not in ids  # window closed before reference time
 
 
-def test_superseded_edges_leave_the_index():
+def test_orphaned_invalidation_stays_in_index():
+    """An edge invalidated with no successor edge to carry a
+    "(previously: X)" annotation (e.g. force_status from BBP
+    propagation, or a bare retraction) must stay retrievable - as
+    negative evidence, not a live fact (render_fact marks it; see
+    test_memory.py) - or the reader can reconstruct the exact
+    conclusion that was just retired from surviving raw facts (observed
+    on the diagnostic probe, res-d4-ass-upda-adj-hi-r1)."""
     g = build_graph()
     r = make_retriever(g)
     assert "job" in r.semantic("acme corp employer")
     g.force_status("job", Sigma(S.TOP, S.BOT))
     r.index()
+    assert "job" in r.semantic("acme corp employer")
+
+
+def test_directly_superseded_edge_leaves_the_index():
+    """When a NEW edge replaces an old one (.supersedes set), the new
+    edge's own rendering already carries the "(previously: X)" history
+    - the old edge must not ALSO surface independently, or the same
+    history would be shown twice."""
+    g = build_graph()
+    g.add_asserted(Edge(id="new-job", subject="user", relation="works_at",
+                        object="Globex", t_transaction="2026-03-01",
+                        supersedes="job"))
+    g.force_status("job", Sigma(S.TOP, S.BOT))
+    r = make_retriever(g)
     assert "job" not in r.semantic("acme corp employer")
+    assert "new-job" in r.semantic("acme corp employer")
 
 
 def test_rrf_prefers_multi_channel_agreement():

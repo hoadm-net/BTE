@@ -1,10 +1,17 @@
 """LLM-free end-to-end memory tests: structured facts in, reader prompt
-out — checks that what BBP supersedes disappears from the reader's view
-(the property Mem0's smoke test failed on).
+out — checks that what BBP supersedes is never presented as a live,
+current fact (the property Mem0's smoke test failed on). A derived fact
+invalidated by propagation (no successor edge states a replacement) is
+shown to the reader as an explicit INVALIDATED marker rather than
+silently dropped - a prior version dropped it entirely, which let the
+reader reconstruct the exact retired conclusion from the still-active
+raw facts that had fed it.
 """
 
+from bte.graph import BJG, Edge
 from bte.ingest import Ingestor
-from bte.memory import BJGMemory
+from bte.lattice import S, Sigma
+from bte.memory import BJGMemory, render_fact
 from bte.retrieval import Retriever
 from bte.rules import ChainRule
 
@@ -39,17 +46,58 @@ def test_answer_reflects_propagated_state():
     ], [], "2026-06-01")
 
     mem.answer("who insures the user?")
-    assert "user | insured_by | Aetna" in reader.prompts[-1]
+    assert "- user | insured_by | Aetna" in reader.prompts[-1]
 
     # correction of the employer: the derived user-level insurance fact
-    # must vanish from the reader's context (the context fact about
-    # acme's insurer legitimately stays - it was never wrong)
+    # has no successor to carry a "(previously: X)" note (nothing
+    # states a new insurer), so it must appear as an explicit
+    # INVALIDATED marker - never again as a plain, live fact line (the
+    # context fact about acme's insurer legitimately stays untouched -
+    # it was never wrong)
     mem.ingest_structured(
         [fact("user", "works_at", "apex", correction=True)], [],
         "2026-06-02")
     mem.answer("who insures the user?")
-    assert "user | insured_by | Aetna" not in reader.prompts[-1]
+    assert "- user | insured_by | Aetna" not in reader.prompts[-1]
+    assert "INVALIDATED: user | insured_by | Aetna" in reader.prompts[-1]
     assert "user | works_at | apex" in reader.prompts[-1]
+
+
+def test_render_fact_marks_inactive_edge_as_invalidated():
+    g = BJG()
+    g.add_asserted(Edge(id="e1", subject="user", relation="works_at",
+                        object="Acme", t_transaction="2026-01-01"))
+    g.force_status("e1", Sigma(S.TOP, S.BOT))
+    line = render_fact(g.edges["e1"], graph=g)
+    assert line.startswith("- INVALIDATED: user | works_at | Acme")
+    assert "no longer holds" in line
+    assert "recorded 2026-01-01" in line
+
+
+def test_render_fact_normal_for_active_edge():
+    g = BJG()
+    g.add_asserted(Edge(id="e1", subject="user", relation="works_at",
+                        object="Acme", t_transaction="2026-01-01"))
+    line = render_fact(g.edges["e1"], graph=g)
+    assert line == "- user | works_at | Acme (recorded 2026-01-01)"
+
+
+def test_bare_retraction_with_no_replacement_shown_as_invalidated():
+    """A retraction with no new value (e.g. "forget that I said X", was
+    never true) leaves NO successor edge either - the same gap as
+    BBP-propagated derived-fact invalidation, just via a different
+    path (ingest.py's apply_retractions calls bbp() directly with no
+    new edge created)."""
+    mem, reader = build_memory()
+    mem.ingest_structured([fact("user", "coffee_limit", "one cup")], [],
+                          "2026-06-01")
+    mem.ingest_structured([], [
+        {"subject": "user", "relation": "coffee_limit", "object": "one cup",
+         "was_wrong": True},
+    ], "2026-06-02")
+    mem.answer("what is the user's coffee limit?")
+    assert "INVALIDATED: user | coffee_limit | one cup" in reader.prompts[-1]
+    assert "- user | coffee_limit | one cup (recorded" not in reader.prompts[-1]
 
 
 def test_empty_memory_answers_unknown_without_reader_call():

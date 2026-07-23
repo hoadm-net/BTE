@@ -12,8 +12,11 @@ import argparse
 import json
 import os
 
-from bte.conflict import (ConflictDetector, DomainDependencies,
-                          make_llm_adjudicator, make_llm_proposer)
+from bte.canonical import (RelationCanonicalizer,
+                           make_llm_relation_verifier)
+from bte.conflict import (ConflictDetector, make_llm_adjudicator,
+                          make_llm_proposer)
+from bte.domains import DomainDependencies
 from bte.extraction import extract_facts
 from bte.ingest import Ingestor
 from bte.llm import CachedLLM
@@ -42,16 +45,24 @@ def bjg_factory(extractor: CachedLLM, reader: CachedLLM,
         # semantic conflict path: same on-disk cache, so a fact's
         # embedding computed for one purpose is free for the other.
         embedder = CachedEmbedder()
+        # one DomainDependencies instance for the detector AND the
+        # retriever's state-basis channel: dependencies confirmed at
+        # write time immediately widen query-time state recovery
+        deps = DomainDependencies() if domain else None
         ing = Ingestor(
             extract=lambda text, ts, ctx: extract_facts(
                 extractor, text, ts, ctx),
             detector=ConflictDetector(
                 adjudicate=make_llm_adjudicator(extractor),
                 embedder=embedder if semantic else None,
-                domain_deps=DomainDependencies() if domain else None,
+                domain_deps=deps,
                 propose=make_llm_proposer(extractor) if domain else None),
+            canonicalizer=RelationCanonicalizer(
+                embedder=embedder,
+                verify=make_llm_relation_verifier(extractor)),
         )
-        return BJGMemory(ing, Retriever(ing.graph, embedder),
+        return BJGMemory(ing, Retriever(ing.graph, embedder,
+                                        domain_deps=deps),
                          reader=reader.complete_text,
                          reader_system=STALE_READER_SYSTEM)
     return make
@@ -95,6 +106,10 @@ def main():
                     help="enable the embedding-similarity conflict path")
     ap.add_argument("--no-domain", action="store_true",
                     help="disable the domain-typed conflict path")
+    ap.add_argument("--tag", default="",
+                    help="config-version suffix for the system label, so "
+                         "records from different pipeline versions never "
+                         "collide in the results file or resume logic")
     args = ap.parse_args()
 
     system = args.system
@@ -103,6 +118,8 @@ def main():
             system += "-dom"
         if args.semantic:
             system += "-sem"
+    if args.tag:
+        system += f"-{args.tag}"
 
     with open(DATA) as f:
         data = json.load(f)

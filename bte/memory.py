@@ -17,7 +17,7 @@ from typing import Callable, Optional, Protocol
 
 from .graph import Edge
 from .ingest import Ingestor
-from .retrieval import Retriever
+from .retrieval import INVALIDATED_PREFIX, Retriever
 
 READER_SYSTEM = (
     "You answer questions about a user from their memory facts.\n"
@@ -28,7 +28,17 @@ READER_SYSTEM = (
     "do not guess. Facts may also carry change history in parentheses: "
     "'(previously: X, recorded DATE)' means the value was X before being "
     "updated - use it for questions about what changed, or increased vs "
-    "decreased.\n"
+    "decreased. A line starting with 'INVALIDATED:' is NOT a current fact - "
+    "it is a conclusion that used to hold but no longer does, shown so you "
+    "know NOT to state it or rely on it; if no other fact establishes the "
+    "current value, treat the matter as unknown rather than falling back "
+    "on the invalidated line. This also applies indirectly: a fact about "
+    "some OTHER entity (a plan, a portal, a company...) can remain true on "
+    "its own even after an INVALIDATED line shows the fact connecting you "
+    "to that entity no longer holds - in that case the other entity's fact "
+    "no longer describes YOUR current situation, so do not use it to "
+    "answer unless a separate, still-valid fact re-establishes your "
+    "connection to that entity.\n"
     "Use ONLY the facts given. If the facts do not determine the answer, "
     "reply exactly: unknown"
 )
@@ -42,6 +52,15 @@ class MemorySystem(Protocol):
 
 
 def render_fact(e: Edge, graph=None, max_history: int = 3) -> str:
+    # an edge retrieved despite being inactive is an orphaned
+    # invalidation (Retriever._orphaned_invalidations): no successor
+    # exists to carry a "(previously: X)" annotation, so say so
+    # directly rather than rendering it as a live fact
+    if graph is not None and not graph.is_active(e.id):
+        recorded = f", recorded {e.t_transaction}" if e.t_transaction else ""
+        return (f"- {INVALIDATED_PREFIX}: {e.subject} | {e.relation} | "
+                f"{e.object} - this no longer holds{recorded}; the "
+                f"information it was based on has changed")
     window = ""
     if e.t_valid_start or e.t_valid_end:
         window = f" (valid {e.t_valid_start or '...'} to {e.t_valid_end or 'now'})"
