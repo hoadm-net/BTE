@@ -13,3 +13,6 @@ data/probe/*
 __pycache__/
 *.pyc
 .cache/
+# per-annotator working file, not a shared artifact - the downloaded
+# report from the app is what gets shared back
+annotator/reviews/
