@@ -83,7 +83,8 @@ def _build_schema(relation_vocab: Optional[list[str]] = None) -> dict:
                         "domain": {"type": "string", "enum": DOMAINS},
                         "valid_from": {"type": ["string", "null"]},
                         "valid_to": {"type": ["string", "null"]},
-                        "confidence": {"type": "number"},
+                        "confidence": {"type": "number", "minimum": 0,
+                                      "maximum": 1},
                         "is_correction": {"type": "boolean"},
                         "premises": {
                             "type": "array",
@@ -128,9 +129,14 @@ Output two lists:
 
 1. facts — NEW positive facts stated in the message.
    - subject: "user" for the speaker; otherwise the named entity.
-   - relation: short snake_case predicate. Reuse the relation names and
-     entity spellings of the known facts whenever the new fact concerns
-     the same kind of thing.
+   - relation: a short snake_case ATTRIBUTE name, specific enough that
+     (subject, relation) works as a slot whose current value is the
+     object. Never use a bare modal or generic verb as the whole
+     relation - "plans_to", "needs_to", "has", "is", "wants" are wrong;
+     "plans_to_reduce_screen_time", "daily_commitment_cap",
+     "wake_up_time" are right. When the new fact updates an attribute
+     that already appears in the known facts, copy that relation name
+     EXACTLY instead of inventing a variant.
    - object: a concrete, self-contained value describing the actual state.
      NEVER a bare "true"/"false" and NEVER a repeat of the relation name
      (e.g. relation "observes_dst" with object "observes_dst" is wrong).
@@ -144,7 +150,12 @@ Output two lists:
      work_or_study; a habit of limiting commitments for health reasons
      is health). Use "other" only when nothing fits.
    - valid_from/valid_to: ISO dates if stated, else null.
-   - confidence: 1.0 for direct statements, lower for hedged ones.
+   - confidence: a number from 0 to 1, always. 1.0 for direct statements
+     (including plain statements about third parties, e.g. "Acme Corp's
+     office is in Denver" is confidence 1.0 - it is not hedged just
+     because the subject isn't the speaker). Lower only for actually
+     hedged statements ("I think", "if I remember right"). Never a
+     placeholder or negative value.
    - is_correction: true only if the speaker says an earlier statement
      was WRONG (misspoke, never true) and this fact replaces it.
    - premises: triples this fact is explicitly derived from ("since X",

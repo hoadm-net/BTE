@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .bbp import BBPResult, bbp
+from .canonical import RelationCanonicalizer
 from .conflict import CORRECTION, ConflictDetector, Decision
 from .graph import BJG, Edge
 from .lattice import S, Sigma
@@ -25,6 +26,22 @@ def _loose_key(s: str) -> str:
     """Lowercase with all non-alphanumeric characters stripped, so
     'CasCorp', 'cas_corp', and 'Cas Corp' compare equal."""
     return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _clamp_confidence(c: object) -> float:
+    """Defense in depth alongside the schema's minimum/maximum
+    constraint (extraction.py): a confidence outside [0, 1] silently
+    poisons every derived edge downstream via derive_closure's min()
+    and defeats BBP's theta cutoff (theta=0 is documented as
+    "unbounded", but any negative confidence is < 0 by construction,
+    truncating propagation after one hop regardless of theta). Found
+    via the diagnostic probe: deepseek-v3.2 occasionally emitted -1 for
+    confidence on facts about third parties, not the speaker."""
+    try:
+        c = float(c)
+    except (TypeError, ValueError):
+        return 1.0
+    return min(1.0, max(0.0, c))
 
 
 @dataclass
@@ -42,6 +59,7 @@ class Ingestor:
         extract: Optional[Callable[[str, str], list[dict]]] = None,
         detector: Optional[ConflictDetector] = None,
         rules: Optional[list[ChainRule]] = None,
+        canonicalizer: Optional[RelationCanonicalizer] = None,
         max_depth: Optional[int] = None,
         theta: float = 0.0,
         decay_factor: float = 0.9,
@@ -50,6 +68,7 @@ class Ingestor:
         self.extract = extract
         self.detector = detector or ConflictDetector()
         self.rules = rules or []
+        self.canonicalizer = canonicalizer
         self.max_depth = max_depth
         self.theta = theta
         self.decay_factor = decay_factor
@@ -89,6 +108,9 @@ class Ingestor:
                 ))
 
     def _retraction_targets(self, r: dict) -> list[Edge]:
+        if self.canonicalizer is not None:
+            r["relation"] = self.canonicalizer.canonical(
+                self.graph, r["subject"], r["relation"], r["object"])
         # Match objects up to case/spacing/casing-convention only (e.g.
         # "CasCorp" vs "cas_corp"): the model is told to copy the known
         # triple's object exactly but sometimes reformats it, and an
@@ -140,6 +162,12 @@ class Ingestor:
 
     def _ingest_one(self, f: dict, t_transaction: str,
                     report: IngestReport) -> None:
+        if self.canonicalizer is not None:
+            f["relation"] = self.canonicalizer.canonical(
+                self.graph, f["subject"], f["relation"], f["object"])
+            for p in f.get("premises") or ():
+                p["relation"] = self.canonicalizer.canonical(
+                    self.graph, p["subject"], p["relation"], p["object"])
         duplicates = [
             e for e in self.graph.find(subject=f["subject"],
                                        relation=f["relation"])
@@ -155,7 +183,7 @@ class Ingestor:
             t_valid_start=f.get("valid_from"),
             t_valid_end=f.get("valid_to"),
             t_transaction=t_transaction,
-            confidence=f.get("confidence", 1.0),
+            confidence=_clamp_confidence(f.get("confidence", 1.0)),
             domain=f.get("domain"),
         )
         premise_ids = [pid for p in f.get("premises", ())

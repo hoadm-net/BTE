@@ -3,19 +3,20 @@ insertion, rule closure, conflict resolution, and propagation — the
 Phase 2 exit-criterion smoke test in executable form.
 """
 
+from bte.bbp import bbp
 from bte.conflict import ConflictDetector, Decision, windows_overlap
 from bte.graph import Edge
-from bte.ingest import Ingestor
-from bte.lattice import S
+from bte.ingest import Ingestor, _clamp_confidence
+from bte.lattice import S, Sigma
 from bte.rules import ChainRule
 
 
 def fact(subject, relation, object, premises=(), correction=False,
-         valid_from=None, valid_to=None):
+         valid_from=None, valid_to=None, confidence=1.0):
     return {
         "subject": subject, "relation": relation, "object": object,
         "valid_from": valid_from, "valid_to": valid_to,
-        "confidence": 1.0, "is_correction": correction,
+        "confidence": confidence, "is_correction": correction,
         "premises": list(premises),
     }
 
@@ -192,3 +193,45 @@ def test_detector_learns_multivalued_relations():
     # marked multi-valued and item 4 skips adjudication entirely
     assert "wants_to_watch" in det.learned_multivalued
     assert len(calls) == 3
+
+
+def test_clamp_confidence_bounds_and_defaults():
+    assert _clamp_confidence(-1) == 0.0
+    assert _clamp_confidence(2.5) == 1.0
+    assert _clamp_confidence(0.4) == 0.4
+    assert _clamp_confidence(None) == 1.0
+    assert _clamp_confidence("not a number") == 1.0
+
+
+def test_out_of_range_extraction_confidence_does_not_poison_propagation():
+    """An LLM occasionally emits a negative confidence for facts about
+    third parties (not the speaker). Unclamped, that value survives
+    derive_closure's min()
+    into every downstream derived edge and makes BBP's theta cutoff
+    (edge.confidence < theta) fire immediately - even at theta=0.0,
+    documented as "unbounded" - truncating propagation after one hop
+    regardless of hop depth. Reproduces the exact shape: two chained
+    ChainRules, the root fact confidence-clean but a raw component
+    fact carrying a corrupted confidence."""
+    rules = [ChainRule("works_at", "located_in", "workplace_city"),
+             ChainRule("workplace_city", "city_timezone", "work_timezone")]
+    ing = Ingestor(detector=ConflictDetector(), rules=rules)
+    ing.ingest_facts([
+        fact("user", "works_at", "Acme Corp", confidence=0.8),
+        fact("acme_corp", "located_in", "Denver", confidence=-1),
+        fact("denver", "city_timezone", "Mountain", confidence=-1),
+    ], "t1")
+    g = ing.graph
+    for e in g.edges.values():
+        assert 0.0 <= e.confidence <= 1.0
+
+    work_city = g.find(subject="user", relation="workplace_city")[0]
+    work_tz = g.find(subject="user", relation="work_timezone")[0]
+    old_works_at = g.find(subject="user", relation="works_at")[0]
+
+    result = bbp(g, old_works_at.id, Sigma(S.BOT, S.TOP), theta=0.0)
+    assert result.cut == set()
+    assert work_city.id in result.changed
+    assert work_tz.id in result.changed
+    assert not g.is_active(work_city.id)
+    assert not g.is_active(work_tz.id)
