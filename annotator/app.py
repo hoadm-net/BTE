@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 
 import streamlit as st
-from sampling import stratified_sample
 
 ROOT = Path(__file__).resolve().parent.parent
 PROBE_PATH = ROOT / "data" / "probe" / "probe_v0.json"
@@ -35,11 +34,6 @@ CHECKS = [
 @st.cache_data
 def load_probe() -> list[dict]:
     return json.loads(PROBE_PATH.read_text())
-
-
-@st.cache_data
-def load_sample(_items: list[dict]) -> list[dict]:
-    return stratified_sample(_items)
 
 
 def load_verdicts() -> dict:
@@ -69,20 +63,17 @@ def render_sessions(item: dict) -> None:
 def main():
     st.set_page_config(page_title="Probe Annotator", layout="wide")
     items = load_probe()
-    sample = load_sample(items)
     verdicts = load_verdicts()
 
     st.sidebar.title("Probe review")
-    st.sidebar.caption(
-        f"{len(sample)} / {len(items)} items sampled "
-        f"({len(sample) / len(items):.0%}), stratified by domain × hop depth")
+    st.sidebar.caption(f"All {len(items)} items")
 
-    n_done = sum(1 for i in sample if i["probe_id"] in verdicts)
-    n_pass = sum(1 for i in sample
+    n_done = sum(1 for i in items if i["probe_id"] in verdicts)
+    n_pass = sum(1 for i in items
                 if verdicts.get(i["probe_id"], {}).get("verdict") == "PASS")
-    n_fail = sum(1 for i in sample
+    n_fail = sum(1 for i in items
                 if verdicts.get(i["probe_id"], {}).get("verdict") == "FAIL")
-    st.sidebar.metric("Reviewed", f"{n_done} / {len(sample)}")
+    st.sidebar.metric("Reviewed", f"{n_done} / {len(items)}")
     if n_done:
         st.sidebar.metric("Agreement (PASS rate)", f"{n_pass / n_done:.0%}")
     st.sidebar.caption(f"PASS {n_pass} · FAIL {n_fail}")
@@ -93,13 +84,12 @@ def main():
             + "; ".join(verdicts[i["probe_id"]].get("failed_checks", []))
             + (f" — {verdicts[i['probe_id']]['reason']}"
                if verdicts[i["probe_id"]].get("reason") else "")
-            for i in sample
+            for i in items
             if verdicts.get(i["probe_id"], {}).get("verdict") == "FAIL"
         )
         report = (
             f"# Probe human validation\n\n"
-            f"Reviewed: {n_done} / {len(sample)} "
-            f"({n_done / len(items):.0%} of the full 168-item set)\n"
+            f"Reviewed: {n_done} / {len(items)}\n"
             f"PASS: {n_pass}  FAIL: {n_fail}  "
             f"Agreement: {n_pass / n_done:.1%}\n\n"
             f"## FAIL items\n\n{fail_lines or '(none)'}\n"
@@ -112,11 +102,11 @@ def main():
     filter_choice = st.sidebar.radio(
         "Show", ["All", "Pending only", "FAIL only"], index=0)
     domain_filter = st.sidebar.multiselect(
-        "Domain", sorted({i["domain"] for i in sample}))
+        "Domain", sorted({i["domain"] for i in items}))
     hop_filter = st.sidebar.multiselect(
-        "Hop depth", sorted({i["hop_depth"] for i in sample}))
+        "Hop depth", sorted({i["hop_depth"] for i in items}))
 
-    visible = sample
+    visible = items
     if filter_choice == "Pending only":
         visible = [i for i in visible if i["probe_id"] not in verdicts]
     elif filter_choice == "FAIL only":

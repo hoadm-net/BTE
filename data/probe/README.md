@@ -110,7 +110,7 @@ check, not something to hand-verify.
 
 ## 4. What to check, per item
 
-For each item in your sample, read `sessions` in order as if you were
+For each item, read `sessions` in order as if you were
 the memory system, then answer these, in order — if an earlier check
 fails, later ones may not apply (note that and move on):
 
@@ -139,14 +139,12 @@ fails, later ones may not apply (note that and move on):
 which check (1–6) failed and why — that's what lets us regenerate the
 right thing instead of guessing.
 
-## 5. Sampling and reporting
+## 5. Coverage and reporting
 
-Review a stratified sample of at least 30% of the 168 items (≥ 51),
-spread across domain, hop depth, and axis rather than the first N in
-file order — a run of items from one axis combination won't surface
-issues specific to another. If you'd like, ask for a pre-selected
-sample list rather than choosing your own; either is fine as long as
-the coverage is spread out.
+The set is small enough to review in full - go through all 168 items
+rather than sampling. The `annotator/` tool (see its README) loads the
+whole set and tracks your progress across sessions, so there's no need
+to plan a subset in advance.
 
 Report back:
 

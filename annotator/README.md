@@ -16,15 +16,13 @@ cd annotator
 uv run --with-requirements requirements.txt streamlit run app.py
 ```
 
-Opens in your browser. It loads `data/probe/probe_v0.json` and
-automatically picks a stratified sample (>=30% of the 168 items,
-spread proportionally across every domain × hop-depth combination —
-see `sampling.py` if you want the exact logic; it's deterministic, so
-the sample is the same every time you open the app).
+Opens in your browser. It loads all 168 items from
+`data/probe/probe_v0.json` - the set is small enough to review in
+full, so there's no sampling step.
 
 ## Using it
 
-- The sidebar lists every sampled item, with a status icon (⬜ pending,
+- The sidebar lists every item, with a status icon (⬜ pending,
   ✅ PASS, ❌ FAIL) and your running PASS/FAIL/agreement counts.
 - Pick an item to see the full conversation on the left (session by
   session, last one marked as the contradiction turn) and the
