@@ -7,6 +7,7 @@ data/*
 data/probe/*
 !data/probe/probe_v0.json
 !data/probe/probe_v0.json.sha256
+!data/probe/README.md
 .venv/
 .env
 __pycache__/
