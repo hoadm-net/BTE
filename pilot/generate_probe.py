@@ -14,6 +14,7 @@ from collections import Counter
 from bte.probe import generate, dump
 
 OUT = "data/probe/probe_v0.json"
+CHECKSUM_OUT = OUT + ".sha256"
 
 
 def main():
@@ -21,6 +22,8 @@ def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     dump(items, OUT)
     digest = hashlib.sha256(open(OUT, "rb").read()).hexdigest()
+    with open(CHECKSUM_OUT, "w") as f:
+        f.write(f"{digest}  {os.path.basename(OUT)}\n")
 
     print(f"items: {len(items)}")
     for axis_name in ("hop_depth", "contradicted", "axis", "density",
@@ -31,6 +34,7 @@ def main():
     print(f"total user turns: {turns}")
     print(f"sha256: {digest}")
     print(f"wrote {OUT}")
+    print(f"wrote {CHECKSUM_OUT}")
 
 
 if __name__ == "__main__":

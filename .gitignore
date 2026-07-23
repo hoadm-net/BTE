@@ -1,5 +1,12 @@
 .plan/
-data/
+# Downloaded external benchmark corpora stay out of git (hundreds of MB);
+# the probe is OUR OWN generated artifact and must be versioned per its
+# own exit criteria (pilot/generate_probe.py, .plan/04-probe.md).
+data/*
+!data/probe/
+data/probe/*
+!data/probe/probe_v0.json
+!data/probe/probe_v0.json.sha256
 .venv/
 .env
 __pycache__/
