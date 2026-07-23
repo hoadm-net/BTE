@@ -69,11 +69,20 @@ EMPLOYMENT = Domain(
         "tz_dst_policy": "The {0} timezone {1}.",
     },
     hedged_root="If I remember right, I'm employed at {0}.",
+    # hop3/hop4 questions and derived_correction[1] deliberately avoid
+    # "work city"/"work timezone" as the grammatical subject - that
+    # phrasing reads as a claim about the CITY'S/TIMEZONE'S own
+    # geography (which never changes here), not the user's personal
+    # effective work-hours timezone (which the derived edge tracks and
+    # the correction/update overrides). A reader can default to the
+    # geographic (wrong) reading under the old wording even with the
+    # correct, unambiguous fact directly retrieved, since both readings
+    # are grammatically valid.
     questions=(
         "Which company do I work for?",
         "Which city is my workplace in?",
-        "Which timezone is my work city in?",
-        "Does my work timezone observe daylight saving time?",
+        "Which timezone do my work hours actually run on?",
+        "Does the timezone my work hours run on observe daylight saving time?",
     ),
     root_update="Update: I've left {0} - I'm at {1} now.",
     root_update_is_retraction=False,
@@ -82,12 +91,13 @@ EMPLOYMENT = Domain(
     derived_update=(
         "Heads up - my workplace is in {1} these days, not {0}.",
         "These days my work hours follow the {1} timezone, not {0}.",
-        "My work timezone {1} now, it no longer {0}.",
+        "My work schedule {1} now, it no longer {0}.",
     ),
     derived_correction=(
         "Your notes are wrong - my workplace city is {1}, not {0}.",
-        "That timezone was never right: my work city is on {1}, not {0}.",
-        "Correction: my work timezone {1}; it never {0}.",
+        "That timezone was never right: the timezone my work hours "
+        "actually run on is {1}, not {0}.",
+        "Correction: my work schedule {1}; it never {0}.",
     ),
     values={
         "root": [["Acme Corp", "Apex Analytics"], ["Globex", "Initech"],
@@ -106,7 +116,16 @@ RESIDENCE = Domain(
     conclusions=("home_utility", "utility_portal", "portal_owner"),
     statements={
         "lives_in": "I live in {0}.",
-        "power_utility_of": "The electric utility serving {0} is {1}.",
+        # "The electric utility serving {0} is {1}." made {1} (the
+        # utility) the sentence's grammatical subject, and extraction
+        # matched that grammar over ChainRule's expected direction
+        # (subject={0}, the city): it produced (lakeside_power,
+        # power_utility_of, Madison) instead of (madison,
+        # power_utility_of, Lakeside Power), so derive_closure's
+        # subject=mid lookup never matched and no derived edge could be
+        # produced. Possessive phrasing, matching employment's
+        # "located_in" template, keeps {0} unambiguously the subject.
+        "power_utility_of": "{0}'s electric utility is {1}.",
         "billing_portal_of": "{0} handles its billing through {1}.",
         "portal_owner_of": "{0} is owned by {1}.",
     },
@@ -144,12 +163,34 @@ TRAINING = Domain(
     name="training",
     relations=("training_for", "plan_of", "long_run_day_of",
                "blocked_slot_of"),
-    conclusions=("training_plan", "long_run_day", "blocked_slot"),
+    # "long_run_day"/"blocked_slot" previously matched their raw-relation
+    # counterpart ("long_run_day_of"/"blocked_slot_of") minus only the
+    # "_of" suffix - relation_vocab offers extraction both names as
+    # equally valid, and it sometimes picked the conclusion name
+    # directly on a third-party fact (e.g. (daniels_2q_plan,
+    # long_run_day, ...) instead of (daniels_2q_plan, long_run_day_of,
+    # ...)), which derive_closure's exact-relation lookup for r2 never
+    # matches, silently producing one fewer derived edge than the chain
+    # requires. "training_plan" never collided with "plan_of" this way
+    # and was never affected. Prefixed the two colliding conclusions to
+    # make them structurally distinct.
+    conclusions=("training_plan", "current_long_run_day",
+                "current_blocked_slot"),
+    # "plan_of"/"blocked_slot_of" previously read as personal statements
+    # ("I follow...", "...is off-limits for me") - extraction naturally
+    # attributed them DIRECTLY to the user with an explicit premise link
+    # (bypassing derive_closure entirely) instead of as a third-party
+    # raw fact anchored on {0} (the race / the run day) the way
+    # "long_run_day_of" already was. That breaks the NEXT ChainRule in
+    # the sequence, which looks up subject=mid by exact relation name,
+    # not by premise-chasing, silently missing a derived edge. Rephrased
+    # to active voice with {0} as the unambiguous subject, matching
+    # "long_run_day_of"'s already-working shape.
     statements={
         "training_for": "I'm training for the {0}.",
-        "plan_of": "For the {0} I follow the {1} plan.",
+        "plan_of": "{0} uses the {1} plan.",
         "long_run_day_of": "The {0} plan schedules long runs on {1}.",
-        "blocked_slot_of": "{0} long runs mean {1} is off-limits for me.",
+        "blocked_slot_of": "{0} blocks off {1}.",
     },
     hedged_root="I think I've signed up to train for the {0}.",
     questions=(
